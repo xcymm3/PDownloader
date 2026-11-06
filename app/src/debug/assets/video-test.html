@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PDownloader 视频全屏测试</title>
+<style>:root{color-scheme:light dark}body{font:16px sans-serif;padding:20px;margin:0}video{width:100%;max-height:60vh}button{padding:14px;margin:16px 0}</style>
+<h1>竖屏全屏测试</h1>
+<p>先点击播放，再使用视频自带的全屏按钮，或点击下面的按钮。全屏应进入竖屏；返回键和“退出全屏”均应恢复浏览器。</p>
+<video id="video" controls playsinline src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"></video>
+<button onclick="document.getElementById('video').requestFullscreen().catch(e=>document.getElementById('status').textContent=e.message)">请求全屏</button>
+<p id="status">测试视频来自 MDN，加载需要网络。本页仅打包到 debug 版本。</p>
+</html>

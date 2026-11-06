@@ -1,0 +1,9 @@
+<resources>
+    <color name="surface">#202124</color>
+    <color name="surface_secondary">#303134</color>
+    <color name="ink">#E8EAED</color>
+    <color name="muted">#BDC1C6</color>
+    <color name="accent">#A8C7FA</color>
+    <color name="accent_surface">#004A77</color>
+    <color name="divider">#5F6368</color>
+</resources>
