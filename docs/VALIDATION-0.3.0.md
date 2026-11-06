@@ -35,8 +35,8 @@
 - 签名 APK 在独立测试实例安装成功，冷启动返回 Status: ok / COLD，versionCode=6 / versionName=0.3.0，进程在检查后保持存活，包 flags 不含 DEBUGGABLE。ZIP 检查确认没有 Debug 媒体和测试 HTML。
 - Release APK 大小 1,342,202 字节，SHA-256：`535fe176ed1d4752c49c0dc5b7803f6f917570aecadae19467fbd843f44bd069`。
 - Debug APK SHA-256：`c0d9c89b024e56c1a99068301e14fe4a4c1e8a5b4167bb47f1a41282613324ec`。
-- GitHub Release：[v0.3.0](https://github.com/xcymm3/PDownloader/releases/tag/v0.3.0)，附件为 PDownloader-0.3.0.apk 与 SHA256SUMS.txt；附件可用性将通过 GitHub API 和下载后哈希校验核对。
-- 原用户 AVD 在本轮开始安装时已离线，随后无窗口启动尚在等待 package 服务；未卸载应用或清理数据。Release 已在独立实例完成安装与冷启动校验。
+- GitHub Release：[v0.3.0](https://github.com/xcymm3/PDownloader/releases/tag/v0.3.0)，附件为 PDownloader-0.3.0.apk 与 SHA256SUMS.txt；GitHub API 确认为公开正式发布（isDraft=false / isPrerelease=false），两个附件均 uploaded；下载回本地后 APK 哈希与 SHA256SUMS.txt 及构建文件一致。
+- 原用户 AVD 起初离线，随后以无窗口方式启动，129 秒后 package 服务就绪；Debug 包覆盖安装返回 Success，versionCode=6 / versionName=0.3.0，未卸载应用或清理数据。更新后停止本轮启动的后台实例，恢复到用户自行启动模拟器的状态。
 
 ## 原始截图
 
