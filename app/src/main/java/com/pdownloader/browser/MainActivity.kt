@@ -35,13 +35,10 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.PopupMenu
 import android.widget.ProgressBar
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.DateFormat
-import java.util.Date
 import java.util.UUID
 import java.util.concurrent.Executors
 import android.widget.ImageView
@@ -65,6 +62,12 @@ class MainActivity : Activity() {
     private lateinit var store: BrowserStore
     private lateinit var root: FrameLayout
     private lateinit var chrome: LinearLayout
+    private lateinit var toolbar: LinearLayout
+    private lateinit var homeButton: BrowserIcon
+    private lateinit var browserControls: LinearLayout
+    private var homePage: HomePageView? = null
+    private lateinit var history: HistoryView
+    private var historyOpen = false
     private lateinit var browser: LinearLayout
     private lateinit var content: FrameLayout
     private lateinit var placeholder: LinearLayout
@@ -107,6 +110,9 @@ class MainActivity : Activity() {
         showTab(selectedId)
         if (savedInstanceState != null) {
             selectSection(savedInstanceState.getInt("section", 0).coerceIn(0, 2))
+            history.query = savedInstanceState.getString("historyQuery").orEmpty()
+            homePage?.query = savedInstanceState.getString("homeQuery").orEmpty()
+            if (savedInstanceState.getBoolean("historyOpen")) openHistory()
             downloads.setCategory(runCatching { DownloadCategory.valueOf(savedInstanceState.getString("downloadCategory").orEmpty()) }.getOrDefault(DownloadCategory.ALL))
         }
         if (savedInstanceState == null) handleIntent(intent)
@@ -135,8 +141,9 @@ class MainActivity : Activity() {
         }
         browser = column()
         chrome.addView(browser, LinearLayout.LayoutParams(-1, 0, 1f))
-        val toolbar = row().apply { setPadding(dp(4), dp(4), dp(4), dp(4)) }
-        toolbar.addView(icon("home", "打开新标签页首页") { navigateHome() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        toolbar = row().apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL; setPadding(dp(4), dp(4), dp(4), dp(4)) }
+        homeButton = icon("home", "打开新标签页首页") { navigateHome() }
+        toolbar.addView(homeButton, LinearLayout.LayoutParams(dp(48), dp(48)))
         address = EditText(this).apply {
             contentDescription = "地址栏"
             hint = "搜索或输入网址"; textSize = 15f; isSingleLine = true
@@ -178,13 +185,13 @@ class MainActivity : Activity() {
         webArea.addView(floating, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply { setMargins(dp(8), dp(8), dp(12), dp(16)) })
         configureFloating(webArea)
         browser.addView(webArea, LinearLayout.LayoutParams(-1, 0, 1f))
-        val controls = row()
+        browserControls = row()
         backButton = icon("back", "后退") { goBack() }
         forwardButton = icon("forward", "前进") { current.web?.goForward() }
         refreshButton = icon("reload", "刷新网页") { current.failed = false; current.web?.reload(); showTab(selectedId) }
-        listOf(backButton, forwardButton, refreshButton).forEach { controls.addView(it, LinearLayout.LayoutParams(0, dp(48), 1f)) }
-        controls.addView(icon("star", "收藏当前网页") { bookmark() }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        browser.addView(controls)
+        listOf(backButton, forwardButton, refreshButton).forEach { browserControls.addView(it, LinearLayout.LayoutParams(0, dp(48), 1f)) }
+        browserControls.addView(icon("star", "收藏当前网页") { bookmark() }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        browser.addView(browserControls)
         placeholder = column().apply { visibility = View.GONE }
         downloads = DownloadsView(this, mediaImages,
             source = { url -> selectSection(0); load(url) },
@@ -192,6 +199,10 @@ class MainActivity : Activity() {
             open = ::openDownloaded, export = ::exportDownloaded, share = ::shareDownloaded, start = ::startDownloads)
         placeholder.addView(downloads, LinearLayout.LayoutParams(-1, -1))
         chrome.addView(placeholder, LinearLayout.LayoutParams(-1, 0, 1f))
+        history = HistoryView(this, store, io, back = ::closeHistory, open = { url ->
+            closeHistory(); hideKeyboard(); load(url)
+        }).apply { visibility = View.GONE }
+        chrome.addView(history, LinearLayout.LayoutParams(-1, 0, 1f))
         chrome.addView(View(this).apply { setBackgroundColor(color(R.color.divider)) }, LinearLayout.LayoutParams(-1, dp(1)))
         val nav = row()
         listOf(Triple("home", "浏览", 0), Triple("download", "下载中", 1), Triple("done", "已下载", 2)).forEach { (kind, title, index) ->
@@ -213,6 +224,7 @@ class MainActivity : Activity() {
     private fun icon(kind: String, description: String, action: () -> Unit) = BrowserIcon(this, kind, description, action)
 
     private fun selectSection(index: Int) {
+        if (historyOpen) { historyOpen = false; history.hide(); hideKeyboard() }
         if (fullView != null) exitFullscreen()
         section = index
         browser.visibility = if (index == 0) View.VISIBLE else View.GONE
@@ -234,6 +246,7 @@ class MainActivity : Activity() {
     }
 
     private fun hideKeyboard() {
+        currentFocus?.clearFocus()
         address.clearFocus()
         (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(address.windowToken, 0)
     }
@@ -247,7 +260,9 @@ class MainActivity : Activity() {
         persistSession()
     }
 
-    private fun navigateHome() {
+    fun navigateHome() {
+        selectSection(0)
+        hideKeyboard()
         exitFullscreen()
         release(current, keepState = false)
         current.url = ""; current.title = "新标签页"; current.failed = false
@@ -267,6 +282,7 @@ class MainActivity : Activity() {
         tabs.find { it.id == selectedId }?.web?.onPause()
         selectedId = id
         current.touched = System.nanoTime()
+        homePage = null
         content.removeAllViews()
         if (current.url.isEmpty()) showHome() else {
             val web = current.web ?: createWebView(current).also { view ->
@@ -286,36 +302,22 @@ class MainActivity : Activity() {
     }
 
     private fun showHome() {
-        val scroll = ScrollView(this)
-        val home = column().apply { setPadding(dp(28), dp(56), dp(28), dp(32)) }
-        home.addView(label("PDownloader", 32f).apply { setTextColor(color(R.color.accent)); typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL) })
-        home.addView(label("从这里开始浏览", 16f, true).apply { setPadding(0, dp(12), 0, dp(28)) })
-        home.addView(action("搜索或输入网址") {
-            address.requestFocus(); (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(address, InputMethodManager.SHOW_IMPLICIT)
-        }.apply { background = shape(R.color.surface_secondary, 28); gravity = Gravity.START or Gravity.CENTER_VERTICAL })
-        val shortcuts = row().apply { setPadding(0, dp(28), 0, dp(24)) }
-        shortcuts.addView(action("收藏夹") { showRecords("bookmarks") }, LinearLayout.LayoutParams(0, dp(56), 1f))
-        shortcuts.addView(action("历史记录") { showRecords("history") }, LinearLayout.LayoutParams(0, dp(56), 1f))
-        home.addView(shortcuts)
-        home.addView(action("粘贴网页链接") {
-            val clip = (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip
-            val text = clip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
-            address.setText(text); address.requestFocus()
-        })
-        home.addView(action("视频与图片下载帮助") { showDownloadHelp() })
-        val favorites = column()
-        home.addView(label("我的收藏", 18f).apply { setPadding(0, dp(24), 0, dp(12)) })
-        home.addView(favorites)
-        io.execute {
-            val records = store.list("bookmarks").take(8)
-            runOnUiThread {
-                if (isDestroyed || !home.isAttachedToWindow) return@runOnUiThread
-                if (records.isEmpty()) favorites.addView(label("还没有收藏，可在网页菜单中添加", 13f, true))
-                else records.forEach { record -> favorites.addView(action(record.title) { load(record.url) }) }
-            }
+        homePage = HomePageView(this, navigate = { url -> hideKeyboard(); load(url) },
+            bookmarks = { showRecords("bookmarks") }, history = ::openHistory).also {
+            content.addView(it, FrameLayout.LayoutParams(-1, -1))
         }
-        scroll.addView(home); content.addView(scroll, FrameLayout.LayoutParams(-1, -1))
     }
+
+    fun openHistory() {
+        pageDialog?.dismiss(); mediaSheet?.dismiss(); imageGallery?.dismiss()
+        hideKeyboard(); selectSection(0)
+        historyOpen = true
+        browser.visibility = View.GONE
+        current.web?.onPause(); probe.pause()
+        history.show()
+    }
+
+    fun closeHistory() { if (historyOpen) selectSection(0) }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createWebView(tab: Tab): WebView = WebView(this).apply {
@@ -446,13 +448,17 @@ class MainActivity : Activity() {
     }
 
     private fun updateToolbar() {
+        val home = current.url.isEmpty()
+        homeButton.visibility = if (home) View.GONE else View.VISIBLE
+        address.visibility = if (home) View.GONE else View.VISIBLE
+        browserControls.visibility = if (home) View.GONE else View.VISIBLE
         if (!address.hasFocus()) address.setText(current.url)
         tabsButton.counter = tabs.size; tabsButton.contentDescription = "管理标签页，共 ${tabs.size} 个"
         backButton.isEnabled = current.web?.canGoBack() == true || current.url.isNotEmpty()
         forwardButton.isEnabled = current.web?.canGoForward() == true
         refreshButton.isEnabled = current.url.isNotEmpty()
         progress.progress = current.web?.progress ?: 100
-        progress.visibility = if (progress.progress < 100 && !current.failed) View.VISIBLE else View.INVISIBLE
+        progress.visibility = if (home) View.GONE else if (progress.progress < 100 && !current.failed) View.VISIBLE else View.INVISIBLE
     }
 
     private fun showMenu(it: View?) {
@@ -514,8 +520,9 @@ class MainActivity : Activity() {
     }
 
     private fun showRecords(table: String) {
+        if (table == "history") { openHistory(); return }
         val token = ++generation
-        val dialog = panel(if (table == "bookmarks") "收藏夹" else "历史记录")
+        val dialog = panel("收藏夹")
         val body = dialog.findViewById<LinearLayout>(PANEL_BODY)
         val loading = label("正在读取…", 15f, true).apply { gravity = Gravity.CENTER }
         body.addView(loading, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -525,13 +532,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (isDestroyed || token != generation || !dialog.isShowing) return@runOnUiThread
                 body.removeView(loading)
-                if (table == "history" && records.isNotEmpty()) body.addView(action("清空历史记录") {
-                    AlertDialog.Builder(this).setTitle("清空全部浏览历史？").setMessage("此操作无法撤销，收藏夹将保留。")
-                        .setNegativeButton("取消", null).setPositiveButton("清空") { _, _ ->
-                            io.execute { store.clearHistory(); runOnUiThread { if (!isDestroyed) { dialog.dismiss(); showRecords(table) } } }
-                        }.show()
-                })
-                if (records.isEmpty()) body.addView(label(if (table == "bookmarks") "还没有收藏的网页" else "还没有浏览记录", 16f, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, 0, 1f))
+                if (records.isEmpty()) body.addView(label("还没有收藏的网页", 16f, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, 0, 1f))
                 else {
                     val list = ListView(this)
                     list.adapter = object : BaseAdapter() {
@@ -540,7 +541,7 @@ class MainActivity : Activity() {
                         override fun getItemId(position: Int) = records[position].id
                         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
                             val record = getItem(position)
-                            val subtitle = if (table == "history") DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(record.visitedAt)) + "  ·  " + record.url else record.url
+                            val subtitle = record.url
                             return recordRow(record.title, subtitle, "删除记录", { dialog.dismiss(); load(record.url) }, {
                                 io.execute { store.delete(table, record.id); runOnUiThread { if (!isDestroyed) { dialog.dismiss(); showRecords(table) } } }
                             })
@@ -693,6 +694,7 @@ class MainActivity : Activity() {
         when {
             mediaSheet?.isShowing() == true -> mediaSheet?.dismiss()
             fullView != null -> exitFullscreen()
+            historyOpen -> closeHistory()
             section != 0 -> selectSection(0)
             current.web?.canGoBack() == true -> current.web?.goBack()
             current.url.isNotEmpty() -> navigateHome()
@@ -714,9 +716,9 @@ class MainActivity : Activity() {
         probe.pause()
         exitFullscreen(); tabs.forEach { it.web?.onPause() }; persistSession(); super.onPause()
     }
-    override fun onResume() { super.onResume(); if (tabs.isNotEmpty() && section == 0) { current.web?.onResume(); probe.resume() } }
+    override fun onResume() { super.onResume(); if (tabs.isNotEmpty() && section == 0 && !historyOpen) { current.web?.onResume(); probe.resume() } }
     override fun onDestroy() {
-        imageGallery?.dismiss(); mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
+        history.close(); imageGallery?.dismiss(); mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
         pageDialog?.dismiss(); exitFullscreen(); tabs.forEach { release(it, false) }; probe.close()
         io.execute { store.close() }; io.shutdown(); super.onDestroy()
     }
@@ -913,6 +915,9 @@ class MainActivity : Activity() {
     }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("exportTask", exportTaskId)
+        outState.putBoolean("historyOpen", historyOpen)
+        outState.putString("historyQuery", history.query)
+        outState.putString("homeQuery", homePage?.query)
         outState.putInt("section", section)
         outState.putString("downloadCategory", downloads.selectedCategory.name)
         super.onSaveInstanceState(outState)

@@ -14,4 +14,19 @@
     <color name="gallery_scrim">#D9000000</color>
     <color name="gallery_controls">#CC000000</color>
     <color name="launcher_background">#181818</color>
+    <color name="home_search">#F0F1F3</color>
+    <color name="home_tile">#F5F5F7</color>
+    <color name="history_card">#F0F1F3</color>
+    <color name="site_white">#FFFFFF</color>
+    <color name="site_black">#101014</color>
+    <color name="site_baidu">#2932E1</color>
+    <color name="site_bilibili">#FB7299</color>
+    <color name="site_youtube">#FF0033</color>
+    <color name="site_google_blue">#4285F4</color>
+    <color name="site_google_red">#EA4335</color>
+    <color name="site_google_yellow">#FBBC05</color>
+    <color name="site_google_green">#34A853</color>
+    <color name="site_instagram_yellow">#FFCD45</color>
+    <color name="site_instagram_pink">#EC3473</color>
+    <color name="site_instagram_purple">#7944C8</color>
 </resources>

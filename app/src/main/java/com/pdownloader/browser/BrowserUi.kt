@@ -66,6 +66,10 @@ internal class BrowserIcon @JvmOverloads constructor(context: Context, private v
             canvas.drawPath(path, paint)
         }
         when (kind) {
+            "search" -> { canvas.drawCircle(10f, 10f, 6f, paint); line(15f, 15f, 21f, 21f) }
+            "history" -> { canvas.drawArc(4f, 4f, 21f, 21f, -130f, 310f, false, paint); line(3f, 3f, 3f, 9f, 9f, 9f); line(12f, 7f, 12f, 13f, 16f, 15f) }
+            "delete" -> { line(4f, 6f, 20f, 6f); line(9f, 3f, 15f, 3f); line(6f, 7f, 7f, 21f, 17f, 21f, 18f, 7f); line(10f, 10f, 10f, 17f); line(14f, 10f, 14f, 17f) }
+            "globe" -> { canvas.drawCircle(12f, 12f, 9f, paint); canvas.drawOval(8f, 3f, 16f, 21f, paint); line(3f, 12f, 21f, 12f); line(5f, 7f, 19f, 7f); line(5f, 17f, 19f, 17f) }
             "back" -> { line(14f, 5f, 7f, 12f, 14f, 19f) }
             "forward" -> { line(9f, 5f, 16f, 12f, 9f, 19f) }
             "close" -> { line(6f, 6f, 18f, 18f); line(18f, 6f, 6f, 18f) }
