@@ -14,19 +14,26 @@ import java.util.concurrent.Executors
 class MediaImages {
     private val main = Handler(Looper.getMainLooper())
     private val workers = Executors.newFixedThreadPool(2)
+    private val previews = Executors.newSingleThreadExecutor()
     private val cache = object : LruCache<String, Bitmap>(12 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
     private var closed = false
     private var pending = 0
     fun load(view: ImageView, url: String, context: RequestContext) {
-        view.tag = url
-        if (url.isBlank() || closed) return
+        loadRemote(view, url, context, false, null)
+    }
+    fun loadPreview(view: ImageView, url: String, context: RequestContext, onResult: (Boolean) -> Unit) {
+        loadRemote(view, url, context, true, onResult)
+    }
+    private fun loadRemote(view: ImageView, url: String, context: RequestContext, preview: Boolean, onResult: ((Boolean) -> Unit)?) {
         val key = url + context.pageUrl
-        cache.get(key)?.let { view.setImageBitmap(it); return }
-        if (pending >= 40) return
-        pending++
-        workers.execute {
+        view.tag = key
+        if (url.isBlank() || closed) { onResult?.invoke(false); return }
+        cache.get(key)?.let { view.setImageBitmap(it); onResult?.invoke(true); return }
+        if (!preview && pending >= 40) return
+        if (!preview) pending++
+        (if (preview) previews else workers).execute {
             val bitmap = runCatching {
                 MediaHttp({ CookieManager.getInstance().getCookie(it) }, BuildConfig.DEBUG).open(url, context).use { response ->
                     MediaHttp.requireSuccess(response.status)
@@ -50,13 +57,33 @@ class MediaImages {
                 }
             }.getOrNull()
             main.post {
-                pending--
+                if (!preview) pending--
                 if (!closed && bitmap != null) {
                     cache.put(key, bitmap)
-                    if (view.tag == url) view.setImageBitmap(bitmap)
                 }
+                if (!closed && view.tag == key) { if (bitmap != null) view.setImageBitmap(bitmap); onResult?.invoke(bitmap != null) }
             }
         }
     }
-    fun close() { closed = true; workers.shutdownNow(); cache.evictAll() }
+    fun loadFile(view: ImageView, file: java.io.File, onResult: (Boolean) -> Unit) {
+        val key = file.path + ":" + file.lastModified()
+        view.tag = key
+        if (closed) return
+        cache.get(key)?.let { view.setImageBitmap(it); onResult(true); return }
+        previews.execute {
+            val bitmap = runCatching {
+                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.path, options)
+                options.inSampleSize = 1
+                while (options.outWidth / options.inSampleSize > 2048 || options.outHeight / options.inSampleSize > 2048) options.inSampleSize *= 2
+                options.inJustDecodeBounds = false
+                BitmapFactory.decodeFile(file.path, options)
+            }.getOrNull()
+            main.post {
+                if (!closed && bitmap != null) cache.put(key, bitmap)
+                if (!closed && view.tag == key) { if (bitmap != null) view.setImageBitmap(bitmap); onResult(bitmap != null) }
+            }
+        }
+    }
+    fun close() { closed = true; workers.shutdownNow(); previews.shutdownNow(); cache.evictAll() }
 }

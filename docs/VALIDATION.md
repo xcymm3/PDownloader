@@ -1,6 +1,6 @@
 # 验证记录
 
-> 以下为 0.1.0 初始版本的历史记录；0.2.0 的当前结果见 [VALIDATION-0.2.0.md](VALIDATION-0.2.0.md)。本文旧 APK 哈希不适用于新版本。
+> 以下为 0.1.0 初始版本的历史记录；当前版本结果见 [VALIDATION-0.2.1.md](VALIDATION-0.2.1.md)，上一版本见 [VALIDATION-0.2.0.md](VALIDATION-0.2.0.md)。本文旧 APK 哈希不适用于新版本。
 
 验证日期：2026-11-06（Asia/Shanghai）。
 

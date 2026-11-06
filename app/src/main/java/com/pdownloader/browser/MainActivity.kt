@@ -87,8 +87,8 @@ class MainActivity : Activity() {
     private lateinit var mediaImages: MediaImages
     private lateinit var downloads: DownloadsView
     private lateinit var floating: LinearLayout
-    private lateinit var videoFab: TextView
-    private lateinit var imageFab: TextView
+    private lateinit var resourceFab: BrowserIcon
+    private var imageGallery: ImageGalleryDialog? = null
     private var mediaSheet: MediaSheet? = null
     private var exportTaskId: String? = null
     private val probeUi = android.os.Handler(android.os.Looper.getMainLooper())
@@ -105,7 +105,10 @@ class MainActivity : Activity() {
         applySystemBarAppearance()
         restoreSession()
         showTab(selectedId)
-        if (savedInstanceState != null) selectSection(savedInstanceState.getInt("section", 0).coerceIn(0, 2))
+        if (savedInstanceState != null) {
+            selectSection(savedInstanceState.getInt("section", 0).coerceIn(0, 2))
+            downloads.setCategory(runCatching { DownloadCategory.valueOf(savedInstanceState.getString("downloadCategory").orEmpty()) }.getOrDefault(DownloadCategory.ALL))
+        }
         if (savedInstanceState == null) handleIntent(intent)
         if (Build.VERSION.SDK_INT >= 33) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(0) { goBack() }
@@ -165,16 +168,14 @@ class MainActivity : Activity() {
         content = FrameLayout(this)
         webArea.addView(content, FrameLayout.LayoutParams(-1, -1))
         floating = column().apply { setPadding(dp(4), dp(4), dp(4), dp(4)) }
-        videoFab = action("视频") { showMedia(false) }
-        imageFab = action("图片") { showMedia(true) }
-        listOf(videoFab, imageFab).forEach { button ->
-            button.textSize = 12f
-            button.setPadding(dp(6), 0, dp(6), 0)
-            button.background = shape(R.color.accent, 28)
-            button.setTextColor(color(R.color.on_accent))
-            floating.addView(button, LinearLayout.LayoutParams(dp(64), dp(52)).apply { topMargin = dp(8) })
+        resourceFab = BrowserIcon(this, "resources", "本页资源") { showMedia(false) }.apply {
+            foregroundColor = color(R.color.on_accent)
+            glyphSizeDp = 24
+            background = shape(R.color.accent, 24)
+            elevation = dp(3).toFloat()
         }
-        webArea.addView(floating, FrameLayout.LayoutParams(dp(72), dp(132), Gravity.BOTTOM or Gravity.END).apply { setMargins(dp(8), dp(8), dp(12), dp(16)) })
+        floating.addView(resourceFab, LinearLayout.LayoutParams(dp(48), dp(48)))
+        webArea.addView(floating, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply { setMargins(dp(8), dp(8), dp(12), dp(16)) })
         configureFloating(webArea)
         browser.addView(webArea, LinearLayout.LayoutParams(-1, 0, 1f))
         val controls = row()
@@ -611,9 +612,9 @@ class MainActivity : Activity() {
         val overlay = FrameLayout(this).apply { setBackgroundColor(color(R.color.video_background)) }
         fullContainer = overlay
         overlay.addView(view, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
-        overlay.addView(action("退出全屏") { exitFullscreen() }.apply {
-            setTextColor(color(R.color.video_foreground)); background = shape(R.color.video_background, 24)
-        }, FrameLayout.LayoutParams(-2, dp(48), Gravity.TOP or Gravity.END).apply { topMargin = dp(32); marginEnd = dp(12) })
+        overlay.addView(BrowserIcon(this, "collapse", "退出全屏") { exitFullscreen() }.apply {
+            foregroundColor = color(R.color.video_foreground); background = shape(R.color.gallery_controls, 24)
+        }, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.END).apply { topMargin = dp(32); marginEnd = dp(12) })
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= 30) window.insetsController?.apply {
@@ -715,7 +716,7 @@ class MainActivity : Activity() {
     }
     override fun onResume() { super.onResume(); if (tabs.isNotEmpty() && section == 0) { current.web?.onResume(); probe.resume() } }
     override fun onDestroy() {
-        mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
+        imageGallery?.dismiss(); mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
         pageDialog?.dismiss(); exitFullscreen(); tabs.forEach { release(it, false) }; probe.close()
         io.execute { store.close() }; io.shutdown(); super.onDestroy()
     }
@@ -739,10 +740,11 @@ class MainActivity : Activity() {
             val videos = session?.groups?.values?.count { !it.image } ?: 0
             val images = session?.groups?.values?.count { it.image } ?: 0
             floating.visibility = if (current.url.isEmpty() || current.failed) View.GONE else View.VISIBLE
-            videoFab.text = if (videos > 0) "视频 $videos" else if ((session?.pending ?: 0) > 0) "检测中" else "视频"
-            imageFab.text = if (images > 0) "图片 $images" else "图片"
-            videoFab.alpha = if (videos > 0) 1f else .65f
-            imageFab.alpha = if (images > 0) 1f else .65f
+            resourceFab.badgeCount = videos + images
+            resourceFab.contentDescription = "本页资源，视频 $videos 项，图片 $images 项"
+            resourceFab.tooltipText = resourceFab.contentDescription
+            resourceFab.alpha = if (videos + images > 0) 1f else .65f
+            if (Build.VERSION.SDK_INT >= 30) resourceFab.stateDescription = if ((session?.pending ?: 0) > 0) "检测中" else "共 ${videos + images} 项"
             mediaSheet?.takeIf { it.isShowing() }?.refresh()
         }, 120)
     }
@@ -805,7 +807,7 @@ class MainActivity : Activity() {
                 else -> false
             }
         }
-        videoFab.setOnTouchListener(touch); imageFab.setOnTouchListener(touch)
+        resourceFab.setOnTouchListener(touch)
         parent.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             if (preferences.contains("x")) {
                 floating.x = preferences.getFloat("x", 1f).coerceIn(0f, 1f) * maxOf(0, parent.width - floating.width)
@@ -831,20 +833,22 @@ class MainActivity : Activity() {
         val file = File(DownloadRepository.get(this).folder(task.id), task.output)
         if (!file.exists()) { toast("本地文件已不存在"); return }
         if (task.variant.kind == MediaKind.IMAGE) {
-            val dialog = Dialog(this)
-            val layout = column()
-            layout.addView(action("关闭图片") { dialog.dismiss() })
-            val image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; contentDescription = task.title }
-            layout.addView(image, LinearLayout.LayoutParams(-1, 0, 1f))
-            dialog.setContentView(layout); dialog.show(); dialog.window?.setLayout(-1, (resources.displayMetrics.heightPixels * .9).toInt())
             io.execute {
-                val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                android.graphics.BitmapFactory.decodeFile(file.path, options)
-                options.inSampleSize = 1
-                while (options.outWidth / options.inSampleSize > 2048 || options.outHeight / options.inSampleSize > 2048) options.inSampleSize *= 2
-                options.inJustDecodeBounds = false
-                val bitmap = android.graphics.BitmapFactory.decodeFile(file.path, options)
-                runOnUiThread { if (dialog.isShowing) image.setImageBitmap(bitmap) }
+                val repository = DownloadRepository.get(this)
+                val tasks = repository.all().filter { it.state == TaskState.COMPLETE && it.variant.kind == MediaKind.IMAGE && File(repository.folder(it.id), it.output).exists() }
+                runOnUiThread {
+                    if (isDestroyed || tasks.none { it.id == task.id }) return@runOnUiThread
+                    hideKeyboard()
+                    imageGallery?.dismiss()
+                    lateinit var viewer: ImageGalleryDialog
+                    viewer = ImageGalleryDialog(this,
+                        tasks.map { GalleryPicture(it.id, it.title, file = File(repository.folder(it.id), it.output)) },
+                        tasks.indexOfFirst { it.id == task.id }, mediaImages,
+                        share = { picture -> tasks.find { it.id == picture.id }?.let(::shareDownloaded) },
+                        export = { picture -> tasks.find { it.id == picture.id }?.let(::exportDownloaded) },
+                        onDismiss = { if (imageGallery === viewer) imageGallery = null })
+                    imageGallery = viewer; viewer.show()
+                }
             }
         } else startActivity(Intent(this, PlayerActivity::class.java).putExtra("task", task.id))
     }
@@ -910,10 +914,11 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("exportTask", exportTaskId)
         outState.putInt("section", section)
+        outState.putString("downloadCategory", downloads.selectedCategory.name)
         super.onSaveInstanceState(outState)
     }
     private fun showDownloadHelp() {
-        AlertDialog.Builder(this).setTitle("下载视频与图片").setMessage("打开网页并播放视频，点击右下方视频或图片入口，选择版本后下载。\n\n普通文件可分享与导出；未加密点播 HLS 保存为可离线播放的资源包，导出为 ZIP。\n\n暂不支持 YouTube、直播、加密 HLS、DRM 和分离音轨的离线下载。部分网站需要在原网页登录后重新检测。\n\n资源数量会随播放和滚动继续增加；未知大小不会显示假百分比。").setPositiveButton("知道了", null).show()
+        AlertDialog.Builder(this).setTitle("下载视频与图片").setMessage("打开网页并播放视频，点击右下方资源图标，选择版本或图片后下载。\n\n图标可长按查看说明；图片预览中轻点关闭、左右滑动切换、双指缩放。\n\n普通文件可分享与导出；未加密点播 HLS 保存为离线资源包，导出为 ZIP。\n\n暂不支持 YouTube、直播、加密 HLS、DRM 和分离音轨的离线下载。部分网站需要在原网页登录后重新检测。").setPositiveButton("知道了", null).show()
     }
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
     companion object { private const val PANEL_BODY = 10001 }

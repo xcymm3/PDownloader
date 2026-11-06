@@ -24,6 +24,8 @@ import com.pdownloader.browser.download.*
 import com.pdownloader.browser.media.*
 import java.util.concurrent.Executors
 
+enum class DownloadCategory(val title: String) { ALL("全部"), VIDEO("视频"), IMAGE("图片") }
+
 // Constructed programmatically with host callbacks; not inflated by a layout editor.
 @android.annotation.SuppressLint("ViewConstructor")
 class DownloadsView(
@@ -44,7 +46,9 @@ class DownloadsView(
     private var closed = false
     private var all = emptyList<DownloadTask>()
     private var displayed = emptyList<DownloadTask>()
-    private var filter = 0
+    var selectedCategory = DownloadCategory.ALL
+        private set
+    private val filterButtons = linkedMapOf<DownloadCategory, TextView>()
     private var query = ""
     private var sort = 0
     private var refreshing = false
@@ -64,7 +68,9 @@ class DownloadsView(
             val cover = FrameLayout(activity)
             val image = ImageView(activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(activity.color(R.color.surface_secondary)); contentDescription = "媒体封面" }
             cover.addView(image, FrameLayout.LayoutParams(-1, -1))
-            cover.addView(activity.label(if (task.variant.kind == MediaKind.IMAGE) "图片" else "▶", 18f, true).apply { gravity = Gravity.CENTER }, FrameLayout.LayoutParams(-1, -1))
+            cover.addView(BrowserIcon(activity, if (task.variant.kind == MediaKind.IMAGE) "image" else "play", if (task.variant.kind == MediaKind.IMAGE) "查看图片" else "播放视频") {
+                if (task.state == TaskState.COMPLETE) open(task) else if (task.variant.kind != MediaKind.IMAGE) online(task)
+            }.apply { foregroundColor = activity.color(R.color.accent) }, FrameLayout.LayoutParams(-1, -1))
             titleRow.addView(cover, LayoutParams(activity.dp(80), activity.dp(60)).apply { marginEnd = activity.dp(12) })
             images.load(image, task.thumbnail, task.context)
             val title = activity.label(task.title, 16f).apply { maxLines = 2; typeface = Typeface.DEFAULT_BOLD }
@@ -84,13 +90,13 @@ class DownloadsView(
             stateRow.addView(activity.label("${task.state.label} · $details", 12f, true), LayoutParams(0, activity.dp(44), 1f))
             if (task.state != TaskState.COMPLETE && task.state != TaskState.CANCELLED) {
                 val paused = task.state !in activeStates
-                stateRow.addView(activity.action(if (paused) "继续" else "暂停") {
+                stateRow.addView(BrowserIcon(activity, if (paused) "play" else "pause", if (paused) "继续下载" else "暂停下载") {
                     io.execute {
                         repository.update(task.id) { it.copy(state = if (paused) TaskState.QUEUED else TaskState.PAUSED, error = "") }
                         if (paused) main.post { start() }
                     }
-                })
-            } else if (task.state == TaskState.COMPLETE) stateRow.addView(activity.action(if (task.variant.kind == MediaKind.IMAGE) "查看" else "播放") { open(task) })
+                }, LayoutParams(activity.dp(48), activity.dp(48)))
+            } else if (task.state == TaskState.COMPLETE) stateRow.addView(BrowserIcon(activity, if (task.variant.kind == MediaKind.IMAGE) "image" else "play", if (task.variant.kind == MediaKind.IMAGE) "查看图片" else "播放视频") { open(task) }, LayoutParams(activity.dp(48), activity.dp(48)))
             body.addView(stateRow)
             val progress = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 1000; progressTintList = android.content.res.ColorStateList.valueOf(activity.color(R.color.accent))
@@ -113,14 +119,14 @@ class DownloadsView(
         setBackgroundColor(activity.color(R.color.surface))
         val top = activity.row().apply { setPadding(activity.dp(20), activity.dp(12), activity.dp(12), 0) }
         top.addView(heading, LayoutParams(0, activity.dp(52), 1f))
-        val sortButton = activity.action("排序") { }
+        val sortButton = BrowserIcon(activity, "sort", "下载排序") { }
         sortButton.setOnClickListener {
             PopupMenu(activity, sortButton).apply {
                 listOf("最近添加", "名称", "文件大小").forEachIndexed { index, name -> menu.add(0, index, index, name) }
                 setOnMenuItemClickListener { sort = it.itemId; applyFilter(); true }
             }.show()
         }
-        top.addView(sortButton); addView(top)
+        top.addView(sortButton, LayoutParams(activity.dp(48), activity.dp(48))); addView(top)
         val search = EditText(activity).apply {
             hint = "搜索下载名称"; textSize = 14f; setSingleLine(true)
             setTextColor(activity.color(R.color.ink)); setHintTextColor(activity.color(R.color.muted))
@@ -132,10 +138,17 @@ class DownloadsView(
             })
         }
         addView(search, LayoutParams(-1, activity.dp(48)).apply { setMargins(activity.dp(16), activity.dp(8), activity.dp(16), activity.dp(8)) })
-        bulk.addView(activity.action("全部暂停") { io.execute { repository.all().filter { it.state in activeStates }.forEach { task -> repository.update(task.id) { it.copy(state = TaskState.PAUSED) } } } }, LayoutParams(0, activity.dp(48), 1f))
-        bulk.addView(activity.action("全部继续") { io.execute { repository.all().filter { it.state in setOf(TaskState.PAUSED, TaskState.FAILED) }.forEach { task -> repository.update(task.id) { it.copy(state = TaskState.QUEUED, error = "") } }; main.post { start() } } }, LayoutParams(0, activity.dp(48), 1f))
+        bulk.gravity = Gravity.END
+        bulk.addView(BrowserIcon(activity, "pause", "暂停全部下载") { io.execute { repository.all().filter { it.state in activeStates }.forEach { task -> repository.update(task.id) { it.copy(state = TaskState.PAUSED) } } } }, LayoutParams(activity.dp(48), activity.dp(48)))
+        bulk.addView(BrowserIcon(activity, "play", "继续全部下载") { io.execute { repository.all().filter { it.state in setOf(TaskState.PAUSED, TaskState.FAILED) }.forEach { task -> repository.update(task.id) { it.copy(state = TaskState.QUEUED, error = "") } }; main.post { start() } } }, LayoutParams(activity.dp(48), activity.dp(48)))
         addView(bulk)
-        listOf("全部", "视频", "图片").forEachIndexed { index, name -> filters.addView(activity.action(name) { filter = index; applyFilter() }, LayoutParams(0, activity.dp(48), 1f)) }
+        filters.setPadding(activity.dp(12), activity.dp(4), activity.dp(12), activity.dp(4))
+        DownloadCategory.entries.forEach { category ->
+            val button = activity.action(category.title) { setCategory(category) }
+            filterButtons[category] = button
+            filters.addView(button, LayoutParams(0, activity.dp(40), 1f).apply { marginStart = activity.dp(4); marginEnd = activity.dp(4) })
+        }
+        updateCategoryButtons()
         addView(filters)
         list.adapter = adapter
         addView(empty, LayoutParams(-1, 0, 1f))
@@ -150,6 +163,18 @@ class DownloadsView(
         refresh()
     }
     fun hide() { visiblePage = false }
+    fun setCategory(category: DownloadCategory) { selectedCategory = category; updateCategoryButtons(); applyFilter() }
+    private fun updateCategoryButtons() {
+        filterButtons.forEach { (category, button) ->
+            val selected = category == selectedCategory
+            button.isSelected = selected
+            button.text = if (selected) "✓ ${category.title}" else category.title
+            button.contentDescription = "筛选：${category.title}，${if (selected) "已选中" else "未选中"}"
+            button.setTextColor(activity.color(if (selected) R.color.accent else R.color.muted))
+            button.background = activity.shape(if (selected) R.color.accent_surface else R.color.surface_secondary, 16)
+            button.typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        }
+    }
     fun close() { closed = true; repository.listeners.remove(listener); io.shutdown() }
     private fun refresh() {
         if (!visiblePage || refreshing || closed) return
@@ -164,7 +189,7 @@ class DownloadsView(
     }
     private fun applyFilter() {
         displayed = all.filter { (it.state == TaskState.COMPLETE) == finished && it.title.contains(query, true) &&
-            (!finished || filter == 0 || (filter == 2) == (it.variant.kind == MediaKind.IMAGE)) }.let {
+            (!finished || selectedCategory == DownloadCategory.ALL || (selectedCategory == DownloadCategory.IMAGE) == (it.variant.kind == MediaKind.IMAGE)) }.let {
             when (sort) { 1 -> it.sortedBy { task -> task.title.lowercase() }; 2 -> it.sortedByDescending { task -> task.downloaded }; else -> it }
         }
         empty.text = if (query.isNotBlank()) "没有匹配的下载" else if (finished) "还没有下载完成的媒体" else "暂无下载任务，去网页发现视频或图片吧"
