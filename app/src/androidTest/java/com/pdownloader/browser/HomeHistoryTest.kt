@@ -131,7 +131,7 @@ class HomeHistoryTest {
         }
     }
 
-    private fun history(activity: MainActivity) = descendants(activity.window.decorView).filterIsInstance<HistoryView>().single()
+    private fun history(activity: MainActivity) = descendants(activity.window.decorView).filterIsInstance<HistoryView>().single { it.table == "history" }
     private fun historyList(activity: MainActivity) = descendants(history(activity)).filterIsInstance<ListView>().single()
     private fun ActivityScenario<MainActivity>.check(block: (MainActivity) -> Boolean): Boolean { var result = false; onActivity { result = block(it) }; return result }
     private fun descendants(view: View): Sequence<View> = sequence {

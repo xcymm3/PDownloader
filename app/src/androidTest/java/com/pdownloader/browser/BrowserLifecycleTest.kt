@@ -27,7 +27,7 @@ class BrowserLifecycleTest {
         })
     }
 
-    @Test fun fullscreenLocksPortraitAndRestoresOrientationExactlyOnce() {
+    @Test fun fullscreenLocksLandscapeAndRestoresOrientationExactlyOnce() {
         launch().use { scenario ->
             scenario.onActivity { activity ->
                 val web = descendants(activity.window.decorView).filterIsInstance<WebView>().first()
@@ -35,7 +35,7 @@ class BrowserLifecycleTest {
                 val original = activity.requestedOrientation
                 var hidden = 0
                 client.onShowCustomView(FrameLayout(activity), WebChromeClient.CustomViewCallback { hidden++ })
-                assertEquals(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, activity.requestedOrientation)
+                assertEquals(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, activity.requestedOrientation)
                 var rejected = 0
                 client.onShowCustomView(FrameLayout(activity), WebChromeClient.CustomViewCallback { rejected++ })
                 assertEquals(1, rejected)

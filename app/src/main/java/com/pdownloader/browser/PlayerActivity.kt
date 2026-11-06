@@ -40,6 +40,7 @@ class PlayerActivity : Activity() {
     private var task: com.pdownloader.browser.download.DownloadTask? = null
     private lateinit var header: LinearLayout
     private lateinit var footer: View
+    private var previousOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     private var fullscreen = false
     private var backgroundPaused = false
     val canSeek: Boolean get() = player?.let { it.isCurrentMediaItemSeekable && it.duration > 0 && it.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM) } == true
@@ -82,7 +83,15 @@ class PlayerActivity : Activity() {
         playerView = (layoutInflater.inflate(R.layout.browser_player_view, layout, false) as PlayerView).apply {
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING); setKeepContentOnPlayerReset(true)
         }
-        layout.addView(playerView, LinearLayout.LayoutParams(-1, 0, 1f))
+        val gestures = SeekGestureFrame(this, read = { player?.takeIf { canSeek }?.let { SeekPosition(it.currentPosition, it.duration) } }, commit = { seekToPosition(it) })
+        gestures.addView(playerView, android.widget.FrameLayout.LayoutParams(-1, -1))
+        gestures.installHint()
+        gestures.excluded = { x, y ->
+            val controls = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_bottom_bar)
+            val rect = android.graphics.Rect()
+            controls?.isShown == true && controls.getGlobalVisibleRect(rect) && rect.contains(x.toInt(), y.toInt())
+        }
+        layout.addView(gestures, LinearLayout.LayoutParams(-1, 0, 1f))
         footer = label(if (task!!.state == TaskState.COMPLETE) "离线播放" else "在线播放", 12f).apply { gravity = Gravity.CENTER; setTextColor(color(R.color.video_foreground)); alpha = .65f }
         layout.addView(footer, LinearLayout.LayoutParams(-1, dp(24)))
         setContentView(layout)
@@ -138,7 +147,9 @@ class PlayerActivity : Activity() {
     }
     @Suppress("DEPRECATION")
     fun setPlayerFullscreen(value: Boolean) {
+        if (value && !fullscreen) previousOrientation = requestedOrientation
         fullscreen = value
+        requestedOrientation = if (value) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else previousOrientation
         header.visibility = if (value) View.GONE else View.VISIBLE
         footer.visibility = if (value) View.GONE else View.VISIBLE
         playerView.setFullscreenButtonState(value)

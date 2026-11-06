@@ -22,13 +22,15 @@ import java.util.concurrent.Executor
 
 /** Hallmark · pre-emit critique: P4 H4 E4 S5 R5 V4. An independent native page, not a dialog. */
 @android.annotation.SuppressLint("ViewConstructor")
-class HistoryView(
+open class HistoryView(
     private val activity: Activity,
     private val store: BrowserStore,
     private val io: Executor,
     back: () -> Unit,
-    private val open: (String) -> Unit
+    private val open: (String) -> Unit,
+    val table: String = "history"
 ) : LinearLayout(activity) {
+    private val bookmarks = table == "bookmarks"
     private var all = emptyList<PageRecord>()
     private var displayed = emptyList<PageRecord>()
     private var request = 0
@@ -36,7 +38,7 @@ class HistoryView(
     private var active = false
     private val search = EditText(activity)
     private val status = activity.label("正在读取…", 13f, true)
-    private val empty = activity.label("还没有浏览记录", 15f, true).apply { gravity = Gravity.CENTER }
+    private val empty = activity.label(if (bookmarks) "还没有收藏的网页" else "还没有浏览记录", 15f, true).apply { gravity = Gravity.CENTER }
     private val list = ListView(activity)
     private val clear = BrowserIcon(activity, "delete", "清空全部历史记录") { confirmClear() }
     private val adapter = object : BaseAdapter() {
@@ -62,7 +64,7 @@ class HistoryView(
                     typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 })
                 addView(activity.label(record.url, 12f, true).apply { setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, activity.dp(4), 0, 0) })
-                addView(activity.label(time(record.visitedAt), 11f, true).apply { setPadding(0, activity.dp(3), 0, 0) })
+                if (!bookmarks) addView(activity.label(time(record.visitedAt), 11f, true).apply { setPadding(0, activity.dp(3), 0, 0) })
             }
             row.addView(text, LayoutParams(0, -2, 1f))
             val anchor = BrowserIcon(activity, "menu", "历史记录操作：${record.title}") {}
@@ -88,15 +90,17 @@ class HistoryView(
         set(value) { search.setText(value) }
 
     init {
+        tag = table
         orientation = VERTICAL; setBackgroundColor(activity.color(R.color.surface))
         val header = activity.row().apply { setPadding(activity.dp(4), activity.dp(4), activity.dp(8), activity.dp(4)) }
         header.addView(BrowserIcon(activity, "back", "返回浏览页", back), LayoutParams(activity.dp(48), activity.dp(48)))
-        header.addView(activity.label("历史记录", 21f), LayoutParams(0, activity.dp(52), 1f))
+        header.addView(activity.label(if (bookmarks) "收藏夹" else "历史记录", 21f), LayoutParams(0, activity.dp(52), 1f))
+        clear.visibility = if (bookmarks) View.GONE else View.VISIBLE
         header.addView(clear, LayoutParams(activity.dp(48), activity.dp(48))); addView(header)
         val field = activity.row().apply { background = activity.shape(R.color.home_search, 28) }
         field.addView(BrowserIcon(activity, "search", "") {}.apply { isClickable = false; isFocusable = false; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO; background = null }, LayoutParams(activity.dp(44), activity.dp(52)))
         search.apply {
-            contentDescription = "搜索历史记录"; hint = "搜索标题或网址"; textSize = 15f; isSingleLine = true
+            contentDescription = if (bookmarks) "搜索收藏夹" else "搜索历史记录"; hint = "搜索标题或网址"; textSize = 15f; isSingleLine = true
             setTextColor(activity.color(R.color.ink)); setHintTextColor(activity.color(R.color.muted)); background = null; setPadding(0, 0, 0, 0)
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
             addTextChangedListener(object : TextWatcher {
@@ -114,7 +118,7 @@ class HistoryView(
         list.apply {
             divider = null; dividerHeight = 0; adapter = this@HistoryView.adapter
             setPadding(activity.dp(16), activity.dp(4), activity.dp(16), activity.dp(16)); clipToPadding = false
-            contentDescription = "浏览历史列表"
+            contentDescription = if (bookmarks) "收藏列表" else "浏览历史列表"
         }
         body.addView(list, FrameLayout.LayoutParams(-1, -1)); body.addView(empty, FrameLayout.LayoutParams(-1, -1))
         addView(body, LayoutParams(-1, 0, 1f))
@@ -125,10 +129,10 @@ class HistoryView(
     fun show() { active = true; visibility = View.VISIBLE; refresh() }
     fun hide() { active = false; ++request; visibility = View.GONE }
     fun close() { closed = true; ++request }
-    fun refresh() = read { store.list("history") }
-    fun deleteRecord(id: Long) = read { store.delete("history", id); store.list("history") }
+    fun refresh() = read { store.list(table) }
+    fun deleteRecord(id: Long) = read { store.delete(table, id); store.list(table) }
     // Called only after confirmation in the UI; also usable by native integration checks.
-    fun clearRecords() = read { store.clearHistory(); store.list("history") }
+    fun clearRecords() { check(!bookmarks); read { store.clearHistory(); store.list(table) } }
 
     private fun confirmClear() {
         AlertDialog.Builder(activity).setTitle("清空全部浏览历史？").setMessage("此操作无法撤销，收藏夹将保留。")
@@ -155,7 +159,7 @@ class HistoryView(
         adapter.notifyDataSetChanged()
         list.visibility = if (displayed.isEmpty()) View.GONE else View.VISIBLE
         empty.visibility = if (displayed.isEmpty()) View.VISIBLE else View.GONE
-        empty.text = if (all.isEmpty()) "还没有浏览记录" else "未找到匹配的记录"
+        empty.text = if (all.isEmpty()) { if (bookmarks) "还没有收藏的网页" else "还没有浏览记录" } else "未找到匹配的记录"
         status.text = if (text.isEmpty()) "共 ${all.size} 条记录" else "找到 ${displayed.size} 条记录"
         status.setOnClickListener(null); clear.isEnabled = all.isNotEmpty()
     }

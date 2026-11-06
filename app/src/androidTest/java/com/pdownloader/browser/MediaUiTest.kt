@@ -8,7 +8,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.CheckBox
 import android.widget.ImageView
-import android.widget.ListView
+import android.widget.GridView
 import android.widget.TextView
 import androidx.media3.common.Player
 import androidx.media3.ui.DefaultTimeBar
@@ -49,23 +49,27 @@ class MediaUiTest {
         ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java).putExtra("section", 2)).use { scenario ->
             var screen: DownloadsView? = null
             scenario.onActivity { activity ->
-                screen = descendants(activity.window.decorView).filterIsInstance<DownloadsView>().single()
+                screen = descendants(activity.window.decorView).filterIsInstance<DownloadsView>().single { it.completedPage }
                 screen!!.show(true)
             }
-            await { onMain { descendants(screen!!).filterIsInstance<ListView>().single().adapter.count == 2 } }
+            await { onMain { descendants(screen!!).filterIsInstance<GridView>().single().adapter.count == 1 } }
             for ((category, expectedId) in listOf(DownloadCategory.IMAGE to photo.id, DownloadCategory.VIDEO to video.id)) {
                 scenario.onActivity { screen!!.setCategory(category) }
                 scenario.onActivity {
-                    val list = descendants(screen!!).filterIsInstance<ListView>().single()
+                    val list = descendants(screen!!).filterIsInstance<GridView>().single()
                     assertEquals(1, list.adapter.count)
                     assertEquals(expectedId, (list.adapter.getItem(0) as DownloadTask).id)
                     val buttons = descendants(screen!!).filterIsInstance<TextView>().filter { it.contentDescription?.startsWith("筛选：") == true }.toList()
                     assertEquals(1, buttons.count { it.isSelected })
                     assertTrue(buttons.single { it.isSelected }.text.contains(category.title))
                 }
-                if (category == DownloadCategory.IMAGE) capture("download-filter")
+                if (category == DownloadCategory.IMAGE) capture("download-grid-image")
+                else {
+                    await { onMain { descendants(screen!!).filterIsInstance<ImageView>().any { it.drawable is android.graphics.drawable.BitmapDrawable } } }
+                    capture("download-grid-video")
+                }
             }
-            scenario.onActivity { screen!!.setCategory(DownloadCategory.ALL); assertEquals(2, descendants(screen!!).filterIsInstance<ListView>().single().adapter.count) }
+            scenario.onActivity { screen!!.setCategory(DownloadCategory.ALL); assertEquals(DownloadCategory.VIDEO, screen!!.selectedCategory); assertEquals(1, descendants(screen!!).filterIsInstance<GridView>().single().adapter.count) }
         }
     }
 
@@ -148,6 +152,7 @@ class MediaUiTest {
                     assertTrue(a.seekToPosition(3000))
                     assertTrue(kotlin.math.abs(a.playbackPositionMs - 3000) < 100)
                 }
+                await { var landscape = false; scenario.onActivity { landscape = it.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE }; landscape }
                 if (kind == MediaKind.VIDEO) {
                     capture("video-player")
                     scenario.onActivity { a ->

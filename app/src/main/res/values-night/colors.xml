@@ -10,4 +10,5 @@
     <color name="home_search">#35353E</color>
     <color name="home_tile">#202025</color>
     <color name="history_card">#29292F</color>
+    <color name="menu_surface">#2B2C35</color>
 </resources>

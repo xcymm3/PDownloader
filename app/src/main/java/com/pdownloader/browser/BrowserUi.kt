@@ -66,6 +66,7 @@ internal class BrowserIcon @JvmOverloads constructor(context: Context, private v
             canvas.drawPath(path, paint)
         }
         when (kind) {
+            "help" -> { canvas.drawCircle(12f, 12f, 9f, paint); canvas.drawArc(9f, 6f, 15f, 12f, 180f, 230f, false, paint); line(12f, 12f, 12f, 14f); line(12f, 18f, 12f, 18.1f) }
             "search" -> { canvas.drawCircle(10f, 10f, 6f, paint); line(15f, 15f, 21f, 21f) }
             "history" -> { canvas.drawArc(4f, 4f, 21f, 21f, -130f, 310f, false, paint); line(3f, 3f, 3f, 9f, 9f, 9f); line(12f, 7f, 12f, 13f, 16f, 15f) }
             "delete" -> { line(4f, 6f, 20f, 6f); line(9f, 3f, 15f, 3f); line(6f, 7f, 7f, 21f, 17f, 21f, 18f, 7f); line(10f, 10f, 10f, 17f); line(14f, 10f, 14f, 17f) }
@@ -86,6 +87,7 @@ internal class BrowserIcon @JvmOverloads constructor(context: Context, private v
             "collapse" -> { line(3f, 8f, 8f, 8f, 8f, 3f); line(16f, 3f, 16f, 8f, 21f, 8f); line(3f, 16f, 8f, 16f, 8f, 21f); line(16f, 21f, 16f, 16f, 21f, 16f) }
             "plus" -> { line(12f, 5f, 12f, 19f); line(5f, 12f, 19f, 12f) }
             "menu" -> { for (y in listOf(5f, 12f, 19f)) { paint.style = Paint.Style.FILL; canvas.drawCircle(12f, y, 1.6f, paint) } }
+            "windows" -> { canvas.drawRoundRect(7f, 3f, 21f, 17f, 2f, 2f, paint); line(3f, 7f, 3f, 21f, 17f, 21f) }
             "tabs" -> {
                 canvas.drawRoundRect(3f, 3f, 21f, 21f, 3f, 3f, paint)
                 paint.style = Paint.Style.FILL; paint.textSize = 11f; paint.textAlign = Paint.Align.CENTER; paint.isFakeBoldText = true

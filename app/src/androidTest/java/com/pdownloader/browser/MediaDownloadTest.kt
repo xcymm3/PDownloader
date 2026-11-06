@@ -80,12 +80,12 @@ class MediaDownloadTest {
         val completed = repository.get(task.id)!!
         assertArrayEquals(sample(), File(repository.folder(task.id), completed.output).readBytes())
     }
-    @Test fun nativePlayerFullscreenStaysPortraitAndRestoresItsToolbar() {
+    @Test fun nativePlayerFullscreenUsesLandscapeAndRestoresItsToolbar() {
         val task = enqueue("/sample.mp4")
         ActivityScenario.launch<PlayerActivity>(Intent(context, PlayerActivity::class.java).putExtra("preview", DownloadRepository.encode(task).toString())).use { scenario ->
             scenario.onActivity { activity ->
                 activity.setPlayerFullscreen(true)
-                assertEquals(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, activity.requestedOrientation)
+                assertEquals(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, activity.requestedOrientation)
                 val title = activity.window.decorView.findViewWithContentDescriptionForTest("播放器标题栏")!!
                 assertEquals(android.view.View.GONE, title.visibility)
                 activity.setPlayerFullscreen(false)

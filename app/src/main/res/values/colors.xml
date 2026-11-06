@@ -29,4 +29,5 @@
     <color name="site_instagram_yellow">#FFCD45</color>
     <color name="site_instagram_pink">#EC3473</color>
     <color name="site_instagram_purple">#7944C8</color>
+    <color name="menu_surface">#F2F2F5</color>
 </resources>

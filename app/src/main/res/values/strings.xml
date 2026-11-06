@@ -9,4 +9,6 @@
     <string name="video_play_pause">播放或暂停</string>
     <string name="video_fullscreen">切换全屏</string>
     <string name="selection_number">%1$d</string>
+    <string name="tabs_count">标签页 · %1$d</string>
+    <string name="gesture_seek_time">跳转至 %1$s</string>
 </resources>

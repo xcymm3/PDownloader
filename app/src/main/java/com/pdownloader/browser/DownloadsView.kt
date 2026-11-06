@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.GridView
 import android.widget.ListView
 import android.widget.PopupMenu
 import android.widget.ProgressBar
@@ -36,27 +37,71 @@ class DownloadsView(
     private val open: (DownloadTask) -> Unit,
     private val export: (DownloadTask) -> Unit,
     private val share: (DownloadTask) -> Unit,
-    private val start: () -> Unit
+    private val start: () -> Unit,
+    val completedPage: Boolean = false
 ) : LinearLayout(activity) {
     private val repository = DownloadRepository.get(activity)
     private val io = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
-    private var finished = false
+    private var finished = completedPage
     private var visiblePage = false
     private var closed = false
     private var all = emptyList<DownloadTask>()
     private var displayed = emptyList<DownloadTask>()
-    var selectedCategory = DownloadCategory.ALL
+    var selectedCategory = DownloadCategory.VIDEO
         private set
     private val filterButtons = linkedMapOf<DownloadCategory, TextView>()
     private var query = ""
     private var sort = 0
     private var refreshing = false
-    private val heading = activity.label("下载中", 25f)
+    private val heading = activity.label(if (completedPage) "已下载" else "下载中", 25f)
     private val bulk = activity.row()
     private val filters = activity.row()
     private val empty = activity.label("暂无下载任务", 16f, true).apply { gravity = Gravity.CENTER }
     private val list = ListView(activity)
+    private val grid = GridView(activity)
+    private var dirty = true
+    private var reloadPending = false
+    private data class CoverHolder(val image: ImageView, val title: TextView, val duration: TextView, var task: DownloadTask? = null)
+    private val gridAdapter = object : BaseAdapter() {
+        override fun getCount() = displayed.size
+        override fun getItem(position: Int) = displayed[position]
+        override fun getItemId(position: Int) = position.toLong()
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val card: LinearLayout
+            val holder: CoverHolder
+            if (convertView == null) {
+                card = activity.column().apply { background = activity.shape(R.color.home_tile, 16); clipToOutline = true }
+                val frame = FrameLayout(activity)
+                val image = ImageView(activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(activity.color(R.color.surface_secondary)); contentDescription = "媒体封面" }
+                frame.addView(image, FrameLayout.LayoutParams(-1, -1))
+                val duration = activity.label("", 11f).apply {
+                    setTextColor(activity.color(R.color.video_foreground)); background = activity.shape(R.color.gallery_controls, 6)
+                    setPadding(activity.dp(6), activity.dp(2), activity.dp(6), activity.dp(2))
+                }
+                frame.addView(duration, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, activity.dp(8), activity.dp(8)) })
+                card.addView(frame, LayoutParams(-1, activity.dp(146)))
+                val title = activity.label("", 14f).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(activity.dp(12), activity.dp(8), activity.dp(12), activity.dp(8)) }
+                card.addView(title, LayoutParams(-1, activity.dp(56)))
+                holder = CoverHolder(image, title, duration); card.tag = holder
+                card.isClickable = true; card.isFocusable = true
+                card.setOnClickListener { holder.task?.let(open) }
+                card.setOnLongClickListener { holder.task?.let { showMenu(card, it) }; true }
+            } else { card = convertView as LinearLayout; holder = card.tag as CoverHolder }
+            val task = getItem(position)
+            if (holder.task != task) {
+                holder.task = task; holder.title.text = task.title
+                card.contentDescription = "${task.title}，点击打开，长按更多操作"
+                holder.duration.visibility = if (task.variant.kind == MediaKind.IMAGE) View.GONE else View.VISIBLE
+                holder.duration.text = if (task.durationMs >= 0) formatMediaTime(task.durationMs) else "--:--"
+                holder.image.setImageResource(if (task.variant.kind == MediaKind.IMAGE) R.drawable.media_image_placeholder else R.drawable.media_video_placeholder)
+                images.loadDownloaded(holder.image, task, repository.folder(task.id)) { duration ->
+                    if (holder.task?.id == task.id && duration > 0) holder.duration.text = formatMediaTime(duration)
+                }
+            }
+            return card
+        }
+    }
     private val adapter = object : BaseAdapter() {
         override fun getCount() = displayed.size
         override fun getItem(position: Int) = displayed[position]
@@ -113,7 +158,7 @@ class DownloadsView(
             return body
         }
     }
-    private val listener: () -> Unit = { refresh() }
+    private val listener: () -> Unit = { dirty = true; refresh() }
     init {
         orientation = VERTICAL
         setBackgroundColor(activity.color(R.color.surface))
@@ -143,7 +188,7 @@ class DownloadsView(
         bulk.addView(BrowserIcon(activity, "play", "继续全部下载") { io.execute { repository.all().filter { it.state in setOf(TaskState.PAUSED, TaskState.FAILED) }.forEach { task -> repository.update(task.id) { it.copy(state = TaskState.QUEUED, error = "") } }; main.post { start() } } }, LayoutParams(activity.dp(48), activity.dp(48)))
         addView(bulk)
         filters.setPadding(activity.dp(12), activity.dp(4), activity.dp(12), activity.dp(4))
-        DownloadCategory.entries.forEach { category ->
+        listOf(DownloadCategory.VIDEO, DownloadCategory.IMAGE).forEach { category ->
             val button = activity.action(category.title) { setCategory(category) }
             filterButtons[category] = button
             filters.addView(button, LayoutParams(0, activity.dp(40), 1f).apply { marginStart = activity.dp(4); marginEnd = activity.dp(4) })
@@ -151,19 +196,33 @@ class DownloadsView(
         updateCategoryButtons()
         addView(filters)
         list.adapter = adapter
+        grid.apply { numColumns = 2; horizontalSpacing = activity.dp(12); verticalSpacing = activity.dp(12)
+            setPadding(activity.dp(16), activity.dp(12), activity.dp(16), activity.dp(16)); clipToPadding = false
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH; adapter = gridAdapter; contentDescription = "已下载媒体网格"
+        }
         addView(empty, LayoutParams(-1, 0, 1f))
         addView(list, LayoutParams(-1, 0, 1f))
+        addView(grid, LayoutParams(-1, 0, 1f))
+        bulk.visibility = if (completedPage) View.GONE else View.VISIBLE
+        filters.visibility = if (completedPage) View.VISIBLE else View.GONE
+        list.visibility = if (completedPage) View.GONE else View.VISIBLE
+        grid.visibility = if (completedPage) View.VISIBLE else View.GONE
+        empty.visibility = View.GONE
         repository.listeners.add(listener)
+        // Warm both pages before first navigation; they keep independent data and scroll positions.
+        refresh(force = true)
     }
     fun show(completed: Boolean) {
+        val changedMode = finished != completed
         finished = completed; visiblePage = true
-        heading.text = if (completed) "已下载" else "下载中"
+        if (changedMode) heading.text = if (completed) "已下载" else "下载中"
         bulk.visibility = if (completed) View.GONE else View.VISIBLE
         filters.visibility = if (completed) View.VISIBLE else View.GONE
-        refresh()
+        applyFilter()
+        if (dirty) refresh(force = true)
     }
     fun hide() { visiblePage = false }
-    fun setCategory(category: DownloadCategory) { selectedCategory = category; updateCategoryButtons(); applyFilter() }
+    fun setCategory(category: DownloadCategory) { selectedCategory = if (category == DownloadCategory.ALL) DownloadCategory.VIDEO else category; updateCategoryButtons(); applyFilter() }
     private fun updateCategoryButtons() {
         filterButtons.forEach { (category, button) ->
             val selected = category == selectedCategory
@@ -176,26 +235,33 @@ class DownloadsView(
         }
     }
     fun close() { closed = true; repository.listeners.remove(listener); io.shutdown() }
-    private fun refresh() {
-        if (!visiblePage || refreshing || closed) return
-        refreshing = true
-        main.postDelayed({
-            if (closed) return@postDelayed
-            io.execute {
-                val tasks = repository.all()
-                main.post { refreshing = false; if (!closed) { all = tasks; applyFilter() } }
+    private fun refresh(force: Boolean = false) {
+        if (closed || (!visiblePage && !force)) return
+        if (refreshing) { reloadPending = true; return }
+        refreshing = true; dirty = false
+        io.execute {
+            val tasks = runCatching { repository.all() }
+            main.post {
+                refreshing = false
+                if (!closed) {
+                    tasks.onSuccess { if (all != it) { all = it; applyFilter() } }.onFailure { dirty = true }
+                    if (reloadPending) { reloadPending = false; refresh(force = true) }
+                }
             }
-        }, 150)
+        }
     }
     private fun applyFilter() {
-        displayed = all.filter { (it.state == TaskState.COMPLETE) == finished && it.title.contains(query, true) &&
+        val next = all.filter { (it.state == TaskState.COMPLETE) == finished && it.title.contains(query, true) &&
             (!finished || selectedCategory == DownloadCategory.ALL || (selectedCategory == DownloadCategory.IMAGE) == (it.variant.kind == MediaKind.IMAGE)) }.let {
             when (sort) { 1 -> it.sortedBy { task -> task.title.lowercase() }; 2 -> it.sortedByDescending { task -> task.downloaded }; else -> it }
         }
+        val changed = next != displayed
+        displayed = next
         empty.text = if (query.isNotBlank()) "没有匹配的下载" else if (finished) "还没有下载完成的媒体" else "暂无下载任务，去网页发现视频或图片吧"
         empty.visibility = if (displayed.isEmpty()) View.VISIBLE else View.GONE
-        list.visibility = if (displayed.isEmpty()) View.GONE else View.VISIBLE
-        adapter.notifyDataSetChanged()
+        list.visibility = if (displayed.isEmpty() || finished) View.GONE else View.VISIBLE
+        grid.visibility = if (displayed.isEmpty() || !finished) View.GONE else View.VISIBLE
+        if (changed) { adapter.notifyDataSetChanged(); gridAdapter.notifyDataSetChanged() }
     }
     private fun showMenu(anchor: View, task: DownloadTask) {
         val names = if (task.state == TaskState.COMPLETE) listOf("打开", "分享", "导出到设备", "重命名", "打开来源网页", "删除") else listOf("在线播放", "打开来源网页", "重命名", "取消并清理", "删除记录")

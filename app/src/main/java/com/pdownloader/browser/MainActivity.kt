@@ -3,7 +3,6 @@ package com.pdownloader.browser
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.Dialog
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -28,12 +27,9 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ListView
-import android.widget.PopupMenu
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
@@ -52,6 +48,7 @@ class MainActivity : Activity() {
         val id: String = UUID.randomUUID().toString(),
         var url: String = "", var title: String = "新标签页",
         var web: WebView? = null, var state: Bundle? = null,
+        var preview: Bitmap? = null,
         var touched: Long = 0, var failed: Boolean = false,
         @Volatile var probeSession: ProbeSession? = null
     )
@@ -64,10 +61,15 @@ class MainActivity : Activity() {
     private lateinit var chrome: LinearLayout
     private lateinit var toolbar: LinearLayout
     private lateinit var homeButton: BrowserIcon
-    private lateinit var browserControls: LinearLayout
     private var homePage: HomePageView? = null
     private lateinit var history: HistoryView
     private var historyOpen = false
+    private lateinit var bookmarks: HistoryView
+    private var bookmarksOpen = false
+    private lateinit var tabOverview: TabOverviewView
+    private var tabsOpen = false
+    private var browserMenu: BrowserMenu? = null
+    internal val menuContent: View? get() = browserMenu?.content
     private lateinit var browser: LinearLayout
     private lateinit var content: FrameLayout
     private lateinit var placeholder: LinearLayout
@@ -84,11 +86,10 @@ class MainActivity : Activity() {
     private var fullCallback: WebChromeClient.CustomViewCallback? = null
     private var fullContainer: FrameLayout? = null
     private var previousOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-    private var generation = 0L
-    private var pageDialog: Dialog? = null
     private lateinit var probe: MediaProbe
     private lateinit var mediaImages: MediaImages
     private lateinit var downloads: DownloadsView
+    private lateinit var completedDownloads: DownloadsView
     private lateinit var floating: LinearLayout
     private lateinit var resourceFab: BrowserIcon
     private var imageGallery: ImageGalleryDialog? = null
@@ -96,6 +97,7 @@ class MainActivity : Activity() {
     private var exportTaskId: String? = null
     private val probeUi = android.os.Handler(android.os.Looper.getMainLooper())
     private var probeUpdatePending = false
+    private var webSeekPosition: SeekPosition? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -112,8 +114,13 @@ class MainActivity : Activity() {
             selectSection(savedInstanceState.getInt("section", 0).coerceIn(0, 2))
             history.query = savedInstanceState.getString("historyQuery").orEmpty()
             homePage?.query = savedInstanceState.getString("homeQuery").orEmpty()
-            if (savedInstanceState.getBoolean("historyOpen")) openHistory()
-            downloads.setCategory(runCatching { DownloadCategory.valueOf(savedInstanceState.getString("downloadCategory").orEmpty()) }.getOrDefault(DownloadCategory.ALL))
+            bookmarks.query = savedInstanceState.getString("bookmarksQuery").orEmpty()
+            when {
+                savedInstanceState.getBoolean("historyOpen") -> openHistory()
+                savedInstanceState.getBoolean("bookmarksOpen") -> openBookmarks()
+                savedInstanceState.getBoolean("tabsOpen") -> showTabs()
+            }
+            completedDownloads.setCategory(runCatching { DownloadCategory.valueOf(savedInstanceState.getString("downloadCategory").orEmpty()) }.getOrDefault(DownloadCategory.VIDEO))
         }
         if (savedInstanceState == null) handleIntent(intent)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -185,24 +192,28 @@ class MainActivity : Activity() {
         webArea.addView(floating, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply { setMargins(dp(8), dp(8), dp(12), dp(16)) })
         configureFloating(webArea)
         browser.addView(webArea, LinearLayout.LayoutParams(-1, 0, 1f))
-        browserControls = row()
+        // Navigation controls live in the menu. Keep state holders for menu enablement.
         backButton = icon("back", "后退") { goBack() }
         forwardButton = icon("forward", "前进") { current.web?.goForward() }
-        refreshButton = icon("reload", "刷新网页") { current.failed = false; current.web?.reload(); showTab(selectedId) }
-        listOf(backButton, forwardButton, refreshButton).forEach { browserControls.addView(it, LinearLayout.LayoutParams(0, dp(48), 1f)) }
-        browserControls.addView(icon("star", "收藏当前网页") { bookmark() }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        browser.addView(browserControls)
+        refreshButton = icon("reload", "刷新网页") { current.failed = false; current.web?.reload() }
         placeholder = column().apply { visibility = View.GONE }
-        downloads = DownloadsView(this, mediaImages,
+        fun downloadPage(completed: Boolean) = DownloadsView(this, mediaImages,
             source = { url -> selectSection(0); load(url) },
             online = { task -> previewTask(task.copy(state = TaskState.QUEUED)) },
-            open = ::openDownloaded, export = ::exportDownloaded, share = ::shareDownloaded, start = ::startDownloads)
-        placeholder.addView(downloads, LinearLayout.LayoutParams(-1, -1))
+            open = ::openDownloaded, export = ::exportDownloaded, share = ::shareDownloaded, start = ::startDownloads,
+            completedPage = completed)
+        downloads = downloadPage(false)
+        completedDownloads = downloadPage(true).apply { visibility = View.GONE }
+        placeholder.addView(downloads, LinearLayout.LayoutParams(-1, 0, 1f))
+        placeholder.addView(completedDownloads, LinearLayout.LayoutParams(-1, 0, 1f))
         chrome.addView(placeholder, LinearLayout.LayoutParams(-1, 0, 1f))
-        history = HistoryView(this, store, io, back = ::closeHistory, open = { url ->
-            closeHistory(); hideKeyboard(); load(url)
-        }).apply { visibility = View.GONE }
+        history = HistoryView(this, store, io, back = ::closeHistory, open = { url -> closeHistory(); load(url) }).apply { visibility = View.GONE }
+        bookmarks = HistoryView(this, store, io, back = ::closeBookmarks, open = { url -> closeBookmarks(); load(url) }, table = "bookmarks").apply { visibility = View.GONE }
+        tabOverview = TabOverviewView(this, back = ::closeTabs, add = { selectSection(0); newTab() },
+            select = ::selectTab, close = ::closeTab).apply { visibility = View.GONE }
         chrome.addView(history, LinearLayout.LayoutParams(-1, 0, 1f))
+        chrome.addView(bookmarks, LinearLayout.LayoutParams(-1, 0, 1f))
+        chrome.addView(tabOverview, LinearLayout.LayoutParams(-1, 0, 1f))
         chrome.addView(View(this).apply { setBackgroundColor(color(R.color.divider)) }, LinearLayout.LayoutParams(-1, dp(1)))
         val nav = row()
         listOf(Triple("home", "浏览", 0), Triple("download", "下载中", 1), Triple("done", "已下载", 2)).forEach { (kind, title, index) ->
@@ -223,7 +234,10 @@ class MainActivity : Activity() {
 
     private fun icon(kind: String, description: String, action: () -> Unit) = BrowserIcon(this, kind, description, action)
 
-    private fun selectSection(index: Int) {
+    fun selectSection(index: Int) {
+        browserMenu?.dismiss()
+        if (bookmarksOpen) { bookmarksOpen = false; bookmarks.hide(); hideKeyboard() }
+        if (tabsOpen) { tabsOpen = false; tabOverview.visibility = View.GONE }
         if (historyOpen) { historyOpen = false; history.hide(); hideKeyboard() }
         if (fullView != null) exitFullscreen()
         section = index
@@ -234,8 +248,13 @@ class MainActivity : Activity() {
         if (tabs.isNotEmpty()) {
             if (index == 0) current.web?.onResume() else current.web?.onPause()
         }
-        if (index != 0) { downloads.show(index == 2); probe.pause() }
-        else { downloads.hide(); if (tabs.isNotEmpty()) probe.attach(current.probeSession, current.web); probe.resume() }
+        downloads.visibility = if (index == 1) View.VISIBLE else View.GONE
+        completedDownloads.visibility = if (index == 2) View.VISIBLE else View.GONE
+        if (index == 1) { downloads.show(false); completedDownloads.hide() }
+        else if (index == 2) { completedDownloads.show(true); downloads.hide() }
+        else { downloads.hide(); completedDownloads.hide() }
+        if (index != 0) probe.pause()
+        else { if (tabs.isNotEmpty()) probe.attach(current.probeSession, current.web); probe.resume() }
     }
 
     private fun submitAddress() {
@@ -269,6 +288,7 @@ class MainActivity : Activity() {
         showTab(selectedId); persistSession()
     }
 
+    fun openNewTab(url: String = "") { newTab(url) }
     private fun newTab(url: String = ""): Tab? {
         if (tabs.size >= 32) { toast("最多打开 32 个标签页，请先关闭部分标签"); return null }
         val tab = Tab(url = url)
@@ -279,6 +299,7 @@ class MainActivity : Activity() {
     private fun showTab(id: String) {
         if (fullView != null) exitFullscreen()
         if (selectedId != id) { mediaSheet?.dismiss(); mediaSheet = null }
+        if (id != selectedId) captureTabPreview()
         tabs.find { it.id == selectedId }?.web?.onPause()
         selectedId = id
         current.touched = System.nanoTime()
@@ -309,7 +330,7 @@ class MainActivity : Activity() {
     }
 
     fun openHistory() {
-        pageDialog?.dismiss(); mediaSheet?.dismiss(); imageGallery?.dismiss()
+        mediaSheet?.dismiss(); imageGallery?.dismiss()
         hideKeyboard(); selectSection(0)
         historyOpen = true
         browser.visibility = View.GONE
@@ -451,7 +472,6 @@ class MainActivity : Activity() {
         val home = current.url.isEmpty()
         homeButton.visibility = if (home) View.GONE else View.VISIBLE
         address.visibility = if (home) View.GONE else View.VISIBLE
-        browserControls.visibility = if (home) View.GONE else View.VISIBLE
         if (!address.hasFocus()) address.setText(current.url)
         tabsButton.counter = tabs.size; tabsButton.contentDescription = "管理标签页，共 ${tabs.size} 个"
         backButton.isEnabled = current.web?.canGoBack() == true || current.url.isNotEmpty()
@@ -461,25 +481,38 @@ class MainActivity : Activity() {
         progress.visibility = if (home) View.GONE else if (progress.progress < 100 && !current.failed) View.VISIBLE else View.INVISIBLE
     }
 
-    private fun showMenu(it: View?) {
-        val popup = PopupMenu(this, it ?: tabsButton)
-        listOf("新建标签页", "收藏当前网页", "收藏夹", "历史记录", "分享网页", "本页视频与图片", "重新检测资源", "下载帮助").forEachIndexed { index, title -> popup.menu.add(0, index, index, title) }
-        if (BuildConfig.DEBUG) popup.menu.add(0, 8, 8, "本地下载功能测试")
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                0 -> newTab()
-                1 -> bookmark()
-                2 -> showRecords("bookmarks")
-                3 -> showRecords("history")
-                4 -> if (current.url.isNotEmpty()) startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, current.url) }, "分享网页")) else toast("请先打开网页")
-                5 -> showMedia(false)
-                6 -> rescan()
-                7 -> showDownloadHelp()
-                8 -> DebugFixtures.url()?.let { load(it) }
-            }
-            true
-        }
-        popup.show()
+    fun showMenu(anchor: View? = null) {
+        browserMenu?.dismiss()
+        val web = current.web
+        val hasPage = current.url.isNotEmpty()
+        browserMenu = BrowserMenu(this,
+            listOf(
+                MenuAction("back", "后退", backButton.isEnabled) { goBack() },
+                MenuAction("forward", "前进", forwardButton.isEnabled) { web?.goForward() },
+                MenuAction("star", "收藏当前网页", hasPage) { bookmark() },
+                MenuAction("share", "分享网页", hasPage) { sharePage() },
+                MenuAction("reload", "刷新网页", hasPage) { current.failed = false; web?.reload() }
+            ), listOf(
+                MenuAction("plus", "新建标签页") { newTab() },
+                MenuAction("windows", "所有标签页") { showTabs() },
+                MenuAction("history", "历史记录") { openHistory() },
+                MenuAction("done", "下载内容") { selectSection(2) },
+                MenuAction("star", "收藏夹") { openBookmarks() },
+                MenuAction("search", "在网页中查找", hasPage) { findInPage() },
+                MenuAction("help", "帮助") { showDownloadHelp() }
+            ))
+        browserMenu?.show(anchor ?: toolbar.getChildAt(toolbar.childCount - 1))
+    }
+    private fun sharePage() {
+        if (current.url.isNotEmpty()) startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"; putExtra(Intent.EXTRA_TEXT, current.url)
+        }, "分享网页"))
+    }
+    private fun findInPage() {
+        val web = current.web ?: return
+        val input = EditText(this).apply { hint = "查找文字"; setSingleLine(true) }
+        AlertDialog.Builder(this).setTitle("在网页中查找").setView(input).setNegativeButton("取消", null)
+            .setPositiveButton("查找") { _, _ -> web.findAllAsync(input.text.toString()) }.show()
     }
 
     private fun bookmark() {
@@ -488,28 +521,31 @@ class MainActivity : Activity() {
         io.execute { store.save("bookmarks", title, url); runOnUiThread { if (!isDestroyed) toast("已添加到收藏夹") } }
     }
 
-    private fun showTabs() {
-        val snapshot = tabs.toList()
-        val dialog = panel("标签页 · ${tabs.size}")
-        val list = ListView(this)
-        list.adapter = object : BaseAdapter() {
-            override fun getCount() = snapshot.size
-            override fun getItem(position: Int) = snapshot[position]
-            override fun getItemId(position: Int) = position.toLong()
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-                val tab = getItem(position)
-                return recordRow((if (tab.id == selectedId) "当前 · " else "") + tab.title, tab.url.ifEmpty { "新标签页" }, "关闭标签页", {
-                    dialog.dismiss(); showTab(tab.id)
-                }, { dialog.dismiss(); closeTab(tab.id); showTabs() })
-            }
+    fun showTabs() {
+        captureTabPreview(); selectSection(0); hideKeyboard()
+        tabsOpen = true; browser.visibility = View.GONE; tabOverview.visibility = View.VISIBLE
+        current.web?.onPause(); probe.pause(); renderTabs()
+    }
+    fun closeTabs() { if (tabsOpen) selectSection(0) }
+    private fun renderTabs() { tabOverview.submit(tabs.map { TabCard(it.id, it.title, it.url, it.preview, it.id == selectedId) }) }
+    private fun captureTabPreview() {
+        if (tabs.isEmpty() || section != 0 || historyOpen || bookmarksOpen || tabsOpen || content.width <= 0 || content.height <= 0) return
+        val child = content.getChildAt(0) ?: return
+        if (!child.isLaidOut || child.isLayoutRequested || content.isLayoutRequested) return
+        runCatching {
+            val width = 256
+            val height = minOf(400, (content.height.toFloat() / content.width * width).toInt()).coerceAtLeast(1)
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
+            val canvas = android.graphics.Canvas(bitmap)
+            canvas.drawColor(color(R.color.surface))
+            canvas.scale(width.toFloat() / content.width, width.toFloat() / content.width)
+            content.draw(canvas)
+            current.preview = bitmap
         }
-        val body = dialog.findViewById<LinearLayout>(PANEL_BODY)
-        body.addView(action("＋ 新建标签页") { dialog.dismiss(); newTab() })
-        body.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        dialog.show(); sizePanel(dialog)
     }
 
-    private fun closeTab(id: String) {
+    fun selectTab(id: String) { if (tabs.any { it.id == id }) { selectSection(0); showTab(id) } }
+    fun closeTab(id: String) {
         val index = tabs.indexOfFirst { it.id == id }
         if (index < 0) return
         exitFullscreen()
@@ -517,74 +553,16 @@ class MainActivity : Activity() {
         if (tabs.isEmpty()) tabs.add(Tab())
         if (id == selectedId) selectedId = tabs[index.coerceAtMost(tabs.lastIndex)].id
         showTab(selectedId)
+        if (tabsOpen) renderTabs()
     }
 
-    private fun showRecords(table: String) {
-        if (table == "history") { openHistory(); return }
-        val token = ++generation
-        val dialog = panel("收藏夹")
-        val body = dialog.findViewById<LinearLayout>(PANEL_BODY)
-        val loading = label("正在读取…", 15f, true).apply { gravity = Gravity.CENTER }
-        body.addView(loading, LinearLayout.LayoutParams(-1, 0, 1f))
-        dialog.show(); sizePanel(dialog)
-        io.execute {
-            val records = store.list(table)
-            runOnUiThread {
-                if (isDestroyed || token != generation || !dialog.isShowing) return@runOnUiThread
-                body.removeView(loading)
-                if (records.isEmpty()) body.addView(label("还没有收藏的网页", 16f, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, 0, 1f))
-                else {
-                    val list = ListView(this)
-                    list.adapter = object : BaseAdapter() {
-                        override fun getCount() = records.size
-                        override fun getItem(position: Int) = records[position]
-                        override fun getItemId(position: Int) = records[position].id
-                        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-                            val record = getItem(position)
-                            val subtitle = record.url
-                            return recordRow(record.title, subtitle, "删除记录", { dialog.dismiss(); load(record.url) }, {
-                                io.execute { store.delete(table, record.id); runOnUiThread { if (!isDestroyed) { dialog.dismiss(); showRecords(table) } } }
-                            })
-                        }
-                    }
-                    body.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-                }
-            }
-        }
+    private fun showRecords(table: String) { if (table == "history") openHistory() else openBookmarks() }
+    fun openBookmarks() {
+        mediaSheet?.dismiss(); imageGallery?.dismiss(); selectSection(0); hideKeyboard()
+        bookmarksOpen = true; browser.visibility = View.GONE
+        current.web?.onPause(); probe.pause(); bookmarks.show()
     }
-
-    private fun recordRow(title: String, subtitle: String, deleteDescription: String, open: () -> Unit, delete: () -> Unit): View = row().apply {
-        setPadding(dp(16), dp(8), dp(4), dp(8))
-        val text = column().apply {
-            isClickable = true; isFocusable = true; setOnClickListener { open() }
-            addView(label(title, 16f).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
-            addView(label(subtitle, 12f, true).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, dp(6), 0, dp(6)) })
-            minimumHeight = dp(56)
-        }
-        addView(text, LinearLayout.LayoutParams(0, -2, 1f))
-        addView(icon("close", deleteDescription, delete), LinearLayout.LayoutParams(dp(48), dp(48)))
-    }
-
-    private fun panel(title: String): Dialog {
-        pageDialog?.dismiss()
-        return Dialog(this).apply {
-            pageDialog = this
-            val layout = column().apply { setBackgroundColor(color(R.color.surface)) }
-            val heading = row()
-            heading.addView(label(title, 21f).apply { setPadding(dp(20), 0, 0, 0) }, LinearLayout.LayoutParams(0, dp(64), 1f))
-            heading.addView(icon("close", "关闭面板") { dismiss() }, LinearLayout.LayoutParams(dp(48), dp(48)))
-            layout.addView(heading)
-            layout.addView(column().apply { id = PANEL_BODY }, LinearLayout.LayoutParams(-1, 0, 1f))
-            setContentView(layout)
-        }
-    }
-    private fun sizePanel(dialog: Dialog) {
-        dialog.window?.apply {
-            setBackgroundDrawableResource(android.R.color.transparent)
-            setLayout(resources.displayMetrics.widthPixels, (resources.displayMetrics.heightPixels * .82).toInt())
-            setGravity(Gravity.BOTTOM)
-        }
-    }
+    fun closeBookmarks() { if (bookmarksOpen) selectSection(0) }
 
     private fun showError(title: String, message: String) {
         clearError()
@@ -602,20 +580,30 @@ class MainActivity : Activity() {
     }
     private fun clearError() { content.findViewWithTag<View>("error")?.let { content.removeView(it) } }
 
-    // Product requirement: video fullscreen defaults to portrait, restored on exit.
+    // Product requirement: video fullscreen explicitly uses landscape even with system rotation lock, restored on exit.
     @SuppressLint("SourceLockedOrientationActivity")
     private fun enterFullscreen(view: View, callback: WebChromeClient.CustomViewCallback) {
         hideKeyboard()
         previousOrientation = requestedOrientation
         fullView = view; fullCallback = callback
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         chrome.visibility = View.GONE
-        val overlay = FrameLayout(this).apply { setBackgroundColor(color(R.color.video_background)) }
+        val overlay = SeekGestureFrame(this, read = { webSeekPosition }, commit = { target ->
+            current.web?.evaluateJavascript(videoScript("if(Number.isFinite(v.duration)) v.currentTime=Math.min(v.duration,${target}/1000); return null;"), null)
+        }).apply { setBackgroundColor(color(R.color.video_background)) }
         fullContainer = overlay
         overlay.addView(view, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+        overlay.installHint()
+        pollVideoPosition(view)
         overlay.addView(BrowserIcon(this, "collapse", "退出全屏") { exitFullscreen() }.apply {
             foregroundColor = color(R.color.video_foreground); background = shape(R.color.gallery_controls, 24)
         }, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.END).apply { topMargin = dp(32); marginEnd = dp(12) })
+        overlay.excluded = { x, y ->
+            val close = overlay.getChildAt(overlay.childCount - 1)
+            val rect = android.graphics.Rect()
+            val bounds = IntArray(2); overlay.getLocationOnScreen(bounds)
+            y >= bounds[1] + overlay.height - dp(64) || (close.getGlobalVisibleRect(rect) && rect.contains(x.toInt(), y.toInt()))
+        }
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= 30) window.insetsController?.apply {
@@ -627,10 +615,23 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun videoScript(action: String): String = """
+        (()=>{const found=[];function scan(d){try{const f=d.fullscreenElement;if(f&&f.tagName==='VIDEO')found.unshift(f);d.querySelectorAll('video').forEach(v=>found.push(v));d.querySelectorAll('iframe').forEach(f=>{try{if(f.contentDocument)scan(f.contentDocument)}catch(e){}})}catch(e){}}scan(document);const v=found.find(v=>!v.paused&&Number.isFinite(v.duration))||found.find(v=>Number.isFinite(v.duration));if(!v)return null;$action})()
+    """.trimIndent()
+    private fun pollVideoPosition(owner: View) {
+        if (fullView !== owner) return
+        current.web?.evaluateJavascript(videoScript("return [v.currentTime*1000,v.duration*1000];")) { value ->
+            if (fullView === owner) webSeekPosition = runCatching {
+                val values = JSONArray(value); SeekPosition(values.getDouble(0).toLong(), values.getDouble(1).toLong())
+            }.getOrNull()
+        }
+        probeUi.postDelayed({ if (fullView === owner) pollVideoPosition(owner) }, 500)
+    }
+
     private fun exitFullscreen() {
         if (fullView == null) return
         val callback = fullCallback
-        fullView = null; fullCallback = null
+        fullView = null; fullCallback = null; webSeekPosition = null
         fullContainer?.removeAllViews(); root.removeView(fullContainer); fullContainer = null
         chrome.visibility = View.VISIBLE
         requestedOrientation = previousOrientation
@@ -695,6 +696,8 @@ class MainActivity : Activity() {
             mediaSheet?.isShowing() == true -> mediaSheet?.dismiss()
             fullView != null -> exitFullscreen()
             historyOpen -> closeHistory()
+            bookmarksOpen -> closeBookmarks()
+            tabsOpen -> closeTabs()
             section != 0 -> selectSection(0)
             current.web?.canGoBack() == true -> current.web?.goBack()
             current.url.isNotEmpty() -> navigateHome()
@@ -710,16 +713,17 @@ class MainActivity : Activity() {
             val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty().take(8192)
             Regex("https?://[^\\s<>]+", RegexOption.IGNORE_CASE).find(text)?.value?.takeIf(AddressResolver::isWebUrl)?.let { selectSection(0); newTab(it) }
         }
+        if (BuildConfig.DEBUG && intent.getBooleanExtra("local_download_fixture", false)) DebugFixtures.url()?.let { selectSection(0); newTab(it) }
         if (intent.hasExtra("section")) selectSection(intent.getIntExtra("section", 0).coerceIn(0, 2))
     }
     override fun onPause() {
         probe.pause()
         exitFullscreen(); tabs.forEach { it.web?.onPause() }; persistSession(); super.onPause()
     }
-    override fun onResume() { super.onResume(); if (tabs.isNotEmpty() && section == 0 && !historyOpen) { current.web?.onResume(); probe.resume() } }
+    override fun onResume() { super.onResume(); if (tabs.isNotEmpty() && section == 0 && !historyOpen && !bookmarksOpen && !tabsOpen) { current.web?.onResume(); probe.resume() } }
     override fun onDestroy() {
-        history.close(); imageGallery?.dismiss(); mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
-        pageDialog?.dismiss(); exitFullscreen(); tabs.forEach { release(it, false) }; probe.close()
+        browserMenu?.dismiss(); bookmarks.close(); history.close(); completedDownloads.close(); imageGallery?.dismiss(); mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
+        exitFullscreen(); tabs.forEach { release(it, false) }; probe.close()
         io.execute { store.close() }; io.shutdown(); super.onDestroy()
     }
 
@@ -915,16 +919,18 @@ class MainActivity : Activity() {
     }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("exportTask", exportTaskId)
+        outState.putBoolean("bookmarksOpen", bookmarksOpen)
+        outState.putString("bookmarksQuery", bookmarks.query)
+        outState.putBoolean("tabsOpen", tabsOpen)
         outState.putBoolean("historyOpen", historyOpen)
         outState.putString("historyQuery", history.query)
         outState.putString("homeQuery", homePage?.query)
         outState.putInt("section", section)
-        outState.putString("downloadCategory", downloads.selectedCategory.name)
+        outState.putString("downloadCategory", completedDownloads.selectedCategory.name)
         super.onSaveInstanceState(outState)
     }
     private fun showDownloadHelp() {
         AlertDialog.Builder(this).setTitle("下载视频与图片").setMessage("打开网页并播放视频，点击右下方资源图标，选择版本或图片后下载。\n\n图标可长按查看说明；图片预览中轻点关闭、左右滑动切换、双指缩放。\n\n普通文件可分享与导出；未加密点播 HLS 保存为离线资源包，导出为 ZIP。\n\n暂不支持 YouTube、直播、加密 HLS、DRM 和分离音轨的离线下载。部分网站需要在原网页登录后重新检测。").setPositiveButton("知道了", null).show()
     }
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
-    companion object { private const val PANEL_BODY = 10001 }
 }
