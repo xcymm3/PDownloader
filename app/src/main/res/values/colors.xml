@@ -13,4 +13,5 @@
     <color name="video_foreground">#FFFFFF</color>
     <color name="gallery_scrim">#D9000000</color>
     <color name="gallery_controls">#CC000000</color>
+    <color name="launcher_background">#181818</color>
 </resources>
