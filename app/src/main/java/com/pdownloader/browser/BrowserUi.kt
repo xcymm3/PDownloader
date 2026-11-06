@@ -25,6 +25,7 @@ internal fun Context.label(value: String, size: Float = 14f, muted: Boolean = fa
 internal fun Context.column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 internal fun Context.row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
 internal fun Context.action(value: String, block: () -> Unit) = label(value).apply {
+    setSingleLine(true)
     gravity = Gravity.CENTER; minHeight = dp(48); isClickable = true; isFocusable = true
     setPadding(dp(16), dp(8), dp(16), dp(8))
     background = RippleDrawable(ColorStateList.valueOf(color(R.color.accent_surface)), shape(R.color.surface), null)

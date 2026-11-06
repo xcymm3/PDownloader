@@ -9,8 +9,8 @@ android {
         applicationId = "com.pdownloader.browser"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { buildConfig = true }
@@ -29,6 +29,10 @@ kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 dependencies {
+    implementation("androidx.core:core:1.16.0")
+    implementation("androidx.media3:media3-exoplayer:1.9.0")
+    implementation("androidx.media3:media3-exoplayer-hls:1.9.0")
+    implementation("androidx.media3:media3-ui:1.9.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

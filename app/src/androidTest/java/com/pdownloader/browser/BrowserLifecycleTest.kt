@@ -52,7 +52,7 @@ class BrowserLifecycleTest {
         launch().use { scenario ->
             scenario.recreate()
             scenario.onActivity { activity ->
-                val address = descendants(activity.window.decorView).filterIsInstance<EditText>().single()
+                val address = descendants(activity.window.decorView).filterIsInstance<EditText>().single { it.contentDescription == "地址栏" }
                 assertEquals("https://pdownloader.test/video", address.text.toString())
                 assertTrue(descendants(activity.window.decorView).any { it is WebView })
             }

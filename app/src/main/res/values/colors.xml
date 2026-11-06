@@ -2,11 +2,12 @@
     <!-- Hallmark · native browser workbench; Chrome-familiar layout; system typography.
          Pre-emit critique: Philosophy 4, Hierarchy 4, Execution 4, Specificity 5, Restraint 5, Variety 4. -->
     <color name="surface">#FFFFFF</color>
-    <color name="surface_secondary">#F1F3F4</color>
-    <color name="ink">#202124</color>
-    <color name="muted">#5F6368</color>
-    <color name="accent">#185ABC</color>
-    <color name="accent_surface">#D3E3FD</color>
+    <color name="surface_secondary">#F7F7F7</color>
+    <color name="ink">#222226</color>
+    <color name="muted">#616166</color>
+    <color name="accent">#C33425</color>
+    <color name="accent_surface">#FCE4DF</color>
+    <color name="on_accent">#FFFFFF</color>
     <color name="divider">#DADCE0</color>
     <color name="video_background">#000000</color>
     <color name="video_foreground">#FFFFFF</color>

@@ -1,9 +1,10 @@
 <resources>
-    <color name="surface">#202124</color>
-    <color name="surface_secondary">#303134</color>
+    <color name="surface">#141414</color>
+    <color name="surface_secondary">#252525</color>
     <color name="ink">#E8EAED</color>
     <color name="muted">#BDC1C6</color>
-    <color name="accent">#A8C7FA</color>
-    <color name="accent_surface">#004A77</color>
+    <color name="accent">#F29082</color>
+    <color name="accent_surface">#592820</color>
+    <color name="on_accent">#23100D</color>
     <color name="divider">#5F6368</color>
 </resources>

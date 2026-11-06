@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">PDownloader</string>
+    <string name="media_quality_line">%1$s · %2$s · %3$s%4$s</string>
+    <string name="media_count">%1$s（%2$d）</string>
+    <string name="image_page">%1$d / %2$d · 已选 %3$d</string>
 </resources>

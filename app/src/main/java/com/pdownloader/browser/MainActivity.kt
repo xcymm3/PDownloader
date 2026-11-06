@@ -15,6 +15,7 @@ import android.os.Message
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.MotionEvent
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -43,13 +44,19 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
 import java.util.concurrent.Executors
+import android.widget.ImageView
+import androidx.core.content.FileProvider
+import com.pdownloader.browser.media.*
+import com.pdownloader.browser.download.*
+import java.io.File
 
 class MainActivity : Activity() {
     private data class Tab(
         val id: String = UUID.randomUUID().toString(),
         var url: String = "", var title: String = "新标签页",
         var web: WebView? = null, var state: Bundle? = null,
-        var touched: Long = 0, var failed: Boolean = false
+        var touched: Long = 0, var failed: Boolean = false,
+        @Volatile var probeSession: ProbeSession? = null
     )
     private val tabs = mutableListOf<Tab>()
     private var selectedId = ""
@@ -76,16 +83,30 @@ class MainActivity : Activity() {
     private var previousOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     private var generation = 0L
     private var pageDialog: Dialog? = null
+    private lateinit var probe: MediaProbe
+    private lateinit var mediaImages: MediaImages
+    private lateinit var downloads: DownloadsView
+    private lateinit var floating: LinearLayout
+    private lateinit var videoFab: TextView
+    private lateinit var imageFab: TextView
+    private var mediaSheet: MediaSheet? = null
+    private var exportTaskId: String? = null
+    private val probeUi = android.os.Handler(android.os.Looper.getMainLooper())
+    private var probeUpdatePending = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        exportTaskId = savedInstanceState?.getString("exportTask")
         store = BrowserStore(applicationContext)
+        mediaImages = MediaImages()
+        probe = MediaProbe(this) { onProbeChanged() }
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         buildUi()
         applySystemBarAppearance()
         restoreSession()
         showTab(selectedId)
-        handleIntent(intent)
+        if (savedInstanceState != null) selectSection(savedInstanceState.getInt("section", 0).coerceIn(0, 2))
+        if (savedInstanceState == null) handleIntent(intent)
         if (Build.VERSION.SDK_INT >= 33) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(0) { goBack() }
         }
@@ -114,6 +135,7 @@ class MainActivity : Activity() {
         val toolbar = row().apply { setPadding(dp(4), dp(4), dp(4), dp(4)) }
         toolbar.addView(icon("home", "打开新标签页首页") { navigateHome() }, LinearLayout.LayoutParams(dp(48), dp(48)))
         address = EditText(this).apply {
+            contentDescription = "地址栏"
             hint = "搜索或输入网址"; textSize = 15f; isSingleLine = true
             setTextColor(color(R.color.ink)); setHintTextColor(color(R.color.muted))
             background = shape(R.color.surface_secondary, 28)
@@ -139,8 +161,22 @@ class MainActivity : Activity() {
             max = 100; progressTintList = android.content.res.ColorStateList.valueOf(color(R.color.accent)); visibility = View.INVISIBLE
         }
         browser.addView(progress, LinearLayout.LayoutParams(-1, dp(2)))
+        val webArea = FrameLayout(this)
         content = FrameLayout(this)
-        browser.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
+        webArea.addView(content, FrameLayout.LayoutParams(-1, -1))
+        floating = column().apply { setPadding(dp(4), dp(4), dp(4), dp(4)) }
+        videoFab = action("视频") { showMedia(false) }
+        imageFab = action("图片") { showMedia(true) }
+        listOf(videoFab, imageFab).forEach { button ->
+            button.textSize = 12f
+            button.setPadding(dp(6), 0, dp(6), 0)
+            button.background = shape(R.color.accent, 28)
+            button.setTextColor(color(R.color.on_accent))
+            floating.addView(button, LinearLayout.LayoutParams(dp(64), dp(52)).apply { topMargin = dp(8) })
+        }
+        webArea.addView(floating, FrameLayout.LayoutParams(dp(72), dp(132), Gravity.BOTTOM or Gravity.END).apply { setMargins(dp(8), dp(8), dp(12), dp(16)) })
+        configureFloating(webArea)
+        browser.addView(webArea, LinearLayout.LayoutParams(-1, 0, 1f))
         val controls = row()
         backButton = icon("back", "后退") { goBack() }
         forwardButton = icon("forward", "前进") { current.web?.goForward() }
@@ -148,7 +184,12 @@ class MainActivity : Activity() {
         listOf(backButton, forwardButton, refreshButton).forEach { controls.addView(it, LinearLayout.LayoutParams(0, dp(48), 1f)) }
         controls.addView(icon("star", "收藏当前网页") { bookmark() }, LinearLayout.LayoutParams(0, dp(48), 1f))
         browser.addView(controls)
-        placeholder = column().apply { gravity = Gravity.CENTER; visibility = View.GONE; setPadding(dp(24), dp(24), dp(24), dp(24)) }
+        placeholder = column().apply { visibility = View.GONE }
+        downloads = DownloadsView(this, mediaImages,
+            source = { url -> selectSection(0); load(url) },
+            online = { task -> previewTask(task.copy(state = TaskState.QUEUED)) },
+            open = ::openDownloaded, export = ::exportDownloaded, share = ::shareDownloaded, start = ::startDownloads)
+        placeholder.addView(downloads, LinearLayout.LayoutParams(-1, -1))
         chrome.addView(placeholder, LinearLayout.LayoutParams(-1, 0, 1f))
         chrome.addView(View(this).apply { setBackgroundColor(color(R.color.divider)) }, LinearLayout.LayoutParams(-1, dp(1)))
         val nav = row()
@@ -180,12 +221,8 @@ class MainActivity : Activity() {
         if (tabs.isNotEmpty()) {
             if (index == 0) current.web?.onResume() else current.web?.onPause()
         }
-        if (index != 0) {
-            placeholder.removeAllViews()
-            placeholder.addView(label(if (index == 1) "下载中" else "已下载", 25f))
-            placeholder.addView(label("视频下载功能尚未开放", 15f, true).apply { setPadding(0, dp(16), 0, dp(24)) })
-            placeholder.addView(action("返回浏览") { selectSection(0) })
-        }
+        if (index != 0) { downloads.show(index == 2); probe.pause() }
+        else { downloads.hide(); if (tabs.isNotEmpty()) probe.attach(current.probeSession, current.web); probe.resume() }
     }
 
     private fun submitAddress() {
@@ -225,6 +262,7 @@ class MainActivity : Activity() {
 
     private fun showTab(id: String) {
         if (fullView != null) exitFullscreen()
+        if (selectedId != id) { mediaSheet?.dismiss(); mediaSheet = null }
         tabs.find { it.id == selectedId }?.web?.onPause()
         selectedId = id
         current.touched = System.nanoTime()
@@ -242,6 +280,7 @@ class MainActivity : Activity() {
             if (current.failed) showError("网页未能加载", "请检查网络连接，或稍后重试。")
         }
         tabs.filter { it.id != id && it.web != null }.sortedByDescending { it.touched }.drop(3).forEach { release(it, true) }
+        probe.attach(current.probeSession, current.web)
         updateToolbar(); persistSession()
     }
 
@@ -257,7 +296,23 @@ class MainActivity : Activity() {
         shortcuts.addView(action("收藏夹") { showRecords("bookmarks") }, LinearLayout.LayoutParams(0, dp(56), 1f))
         shortcuts.addView(action("历史记录") { showRecords("history") }, LinearLayout.LayoutParams(0, dp(56), 1f))
         home.addView(shortcuts)
-        home.addView(label("浅色 / 深色外观跟随系统", 13f, true))
+        home.addView(action("粘贴网页链接") {
+            val clip = (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClip
+            val text = clip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+            address.setText(text); address.requestFocus()
+        })
+        home.addView(action("视频与图片下载帮助") { showDownloadHelp() })
+        val favorites = column()
+        home.addView(label("我的收藏", 18f).apply { setPadding(0, dp(24), 0, dp(12)) })
+        home.addView(favorites)
+        io.execute {
+            val records = store.list("bookmarks").take(8)
+            runOnUiThread {
+                if (isDestroyed || !home.isAttachedToWindow) return@runOnUiThread
+                if (records.isEmpty()) favorites.addView(label("还没有收藏，可在网页菜单中添加", 13f, true))
+                else records.forEach { record -> favorites.addView(action(record.title) { load(record.url) }) }
+            }
+        }
         scroll.addView(home); content.addView(scroll, FrameLayout.LayoutParams(-1, -1))
     }
 
@@ -286,6 +341,7 @@ class MainActivity : Activity() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (tab.web !== view) return
                 tab.url = url; tab.failed = false
+                beginProbe(tab, view, url)
                 if (tab.id == selectedId) { clearError(); updateToolbar() }
             }
             override fun onPageFinished(view: WebView, url: String) {
@@ -295,6 +351,15 @@ class MainActivity : Activity() {
                 if (!tab.failed && AddressResolver.isWebUrl(url)) io.execute { store.save("history", title, url) }
                 if (tab.id == selectedId) updateToolbar()
                 persistSession()
+            }
+            override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                if (tab.web === view && AddressResolver.isWebUrl(url) && tab.probeSession?.pageUrl != url) {
+                    tab.url = url; beginProbe(tab, view, url)
+                    if (tab.id == selectedId) updateToolbar()
+                }
+            }
+            override fun onLoadResource(view: WebView, url: String) {
+                if (tab.web === view) probe.observeUrl(tab.probeSession, url)
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame && tab.web === view) {
@@ -311,6 +376,7 @@ class MainActivity : Activity() {
                 return true
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                probe.observe(tab.probeSession, request)
                 if (BuildConfig.DEBUG && request.url.toString() == "https://pdownloader.test/video") {
                     return runCatching { WebResourceResponse("text/html", "utf-8", assets.open("video-test.html")) }.getOrNull()
                 }
@@ -325,7 +391,15 @@ class MainActivity : Activity() {
                 }
             }
             override fun onReceivedTitle(view: WebView, title: String?) {
-                if (tab.web === view && !title.isNullOrBlank()) { tab.title = title; persistSession() }
+                if (tab.web === view && !title.isNullOrBlank()) {
+                    tab.title = title
+                    tab.probeSession?.let { session ->
+                        val previous = session.title
+                        session.title = title.take(200)
+                        session.groups.values.filter { it.title == previous }.forEach { it.title = session.title }
+                    }
+                    onProbeChanged(); persistSession()
+                }
             }
             override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
                 if (!isUserGesture || tab.id != selectedId) return false
@@ -345,7 +419,11 @@ class MainActivity : Activity() {
             }
             override fun onHideCustomView() { exitFullscreen() }
         }
-        setDownloadListener { _, _, _, _, _ -> toast("视频下载功能尚未开放") }
+        setDownloadListener { url, _, _, mime, length ->
+            val session = tab.probeSession ?: probe.begin(tab.id, tab.url, settings.userAgentString, tab.title).also { tab.probeSession = it }
+            probe.direct(session, url, mime.orEmpty(), length)
+            if (tab.id == selectedId) showMedia(mime?.startsWith("image/") == true)
+        }
     }
 
     private fun offerExternal(uri: Uri) {
@@ -378,7 +456,8 @@ class MainActivity : Activity() {
 
     private fun showMenu(it: View?) {
         val popup = PopupMenu(this, it ?: tabsButton)
-        listOf("新建标签页", "收藏当前网页", "收藏夹", "历史记录", "分享网页").forEachIndexed { index, title -> popup.menu.add(0, index, index, title) }
+        listOf("新建标签页", "收藏当前网页", "收藏夹", "历史记录", "分享网页", "本页视频与图片", "重新检测资源", "下载帮助").forEachIndexed { index, title -> popup.menu.add(0, index, index, title) }
+        if (BuildConfig.DEBUG) popup.menu.add(0, 8, 8, "本地下载功能测试")
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 0 -> newTab()
@@ -386,6 +465,10 @@ class MainActivity : Activity() {
                 2 -> showRecords("bookmarks")
                 3 -> showRecords("history")
                 4 -> if (current.url.isNotEmpty()) startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, current.url) }, "分享网页")) else toast("请先打开网页")
+                5 -> showMedia(false)
+                6 -> rescan()
+                7 -> showDownloadHelp()
+                8 -> DebugFixtures.url()?.let { load(it) }
             }
             true
         }
@@ -571,6 +654,8 @@ class MainActivity : Activity() {
     }
 
     private fun release(tab: Tab, keepState: Boolean) {
+        probe.retire(tab.probeSession)
+        tab.probeSession = null
         val view = tab.web ?: return
         tab.state = if (keepState) Bundle().also { view.saveState(it) } else null
         tab.web = null
@@ -605,6 +690,7 @@ class MainActivity : Activity() {
 
     private fun goBack() {
         when {
+            mediaSheet?.isShowing() == true -> mediaSheet?.dismiss()
             fullView != null -> exitFullscreen()
             section != 0 -> selectSection(0)
             current.web?.canGoBack() == true -> current.web?.goBack()
@@ -617,14 +703,217 @@ class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); handleIntent(intent) }
     private fun handleIntent(intent: Intent) {
         if (intent.action == Intent.ACTION_VIEW) intent.dataString?.takeIf(AddressResolver::isWebUrl)?.let { selectSection(0); newTab(it) }
+        if (intent.action == Intent.ACTION_SEND) {
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty().take(8192)
+            Regex("https?://[^\\s<>]+", RegexOption.IGNORE_CASE).find(text)?.value?.takeIf(AddressResolver::isWebUrl)?.let { selectSection(0); newTab(it) }
+        }
+        if (intent.hasExtra("section")) selectSection(intent.getIntExtra("section", 0).coerceIn(0, 2))
     }
     override fun onPause() {
+        probe.pause()
         exitFullscreen(); tabs.forEach { it.web?.onPause() }; persistSession(); super.onPause()
     }
-    override fun onResume() { super.onResume(); if (tabs.isNotEmpty() && section == 0) current.web?.onResume() }
+    override fun onResume() { super.onResume(); if (tabs.isNotEmpty() && section == 0) { current.web?.onResume(); probe.resume() } }
     override fun onDestroy() {
-        pageDialog?.dismiss(); exitFullscreen(); tabs.forEach { release(it, false) }
+        mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
+        pageDialog?.dismiss(); exitFullscreen(); tabs.forEach { release(it, false) }; probe.close()
         io.execute { store.close() }; io.shutdown(); super.onDestroy()
+    }
+
+    private fun beginProbe(tab: Tab, web: WebView, url: String) {
+        probe.retire(tab.probeSession)
+        tab.probeSession = if (webUrl(url)) probe.begin(tab.id, url, web.settings.userAgentString, tab.title) else null
+        if (tab.id == selectedId) {
+            mediaSheet?.dismiss(); mediaSheet = null
+            probe.attach(tab.probeSession, web)
+        }
+    }
+
+    private fun onProbeChanged() {
+        if (probeUpdatePending || isDestroyed) return
+        probeUpdatePending = true
+        probeUi.postDelayed({
+            probeUpdatePending = false
+            if (isDestroyed || tabs.isEmpty()) return@postDelayed
+            val session = current.probeSession
+            val videos = session?.groups?.values?.count { !it.image } ?: 0
+            val images = session?.groups?.values?.count { it.image } ?: 0
+            floating.visibility = if (current.url.isEmpty() || current.failed) View.GONE else View.VISIBLE
+            videoFab.text = if (videos > 0) "视频 $videos" else if ((session?.pending ?: 0) > 0) "检测中" else "视频"
+            imageFab.text = if (images > 0) "图片 $images" else "图片"
+            videoFab.alpha = if (videos > 0) 1f else .65f
+            imageFab.alpha = if (images > 0) 1f else .65f
+            mediaSheet?.takeIf { it.isShowing() }?.refresh()
+        }, 120)
+    }
+
+    private fun showMedia(imagesFirst: Boolean) {
+        val session = current.probeSession ?: run { toast("请先打开网页，并尝试播放视频"); return }
+        if (mediaSheet?.isShowing() == true) return
+        hideKeyboard()
+        mediaSheet = MediaSheet(this, session, mediaImages, submit = { snapshot ->
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 700)
+            }
+            io.execute {
+                val repository = DownloadRepository.get(this)
+                var added = 0
+                val result = runCatching {
+                    snapshot.forEach { (group, variant) -> if (repository.enqueue(group.title, variant, variant.requestContext ?: group.context, group.thumbnail, group.durationMs).second) added++ }
+                }
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        toast(if (result.isFailure) "已添加 $added 项；部分任务创建失败，请检查存储空间后重试" else if (added > 0) "已加入 $added 个下载任务" else "所选资源已有下载任务，请在下载列表查看")
+                        if (added > 0) startDownloads()
+                    }
+                }
+            }
+        }, previewVideo = { group, variant ->
+            previewTask(DownloadTask(java.util.UUID.randomUUID().toString(), group.title, variant, variant.requestContext ?: group.context))
+        }, retry = ::rescan).also { it.show(imagesFirst) }
+    }
+
+    private fun rescan() {
+        val web = current.web ?: return
+        beginProbe(current, web, current.url)
+        probe.resume(); showMedia(false)
+    }
+
+    // Native views already implement performClick; both tap handlers explicitly invoke it.
+    @SuppressLint("ClickableViewAccessibility")
+    private fun configureFloating(parent: FrameLayout) {
+        val preferences = getSharedPreferences("floating", MODE_PRIVATE)
+        var downX = 0f; var downY = 0f; var fromX = 0f; var fromY = 0f; var moved = false
+        val touch = View.OnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { downX = event.rawX; downY = event.rawY; fromX = floating.x; fromY = floating.y; moved = false; true }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downX; val dy = event.rawY - downY
+                    if (kotlin.math.abs(dx) + kotlin.math.abs(dy) > dp(8)) moved = true
+                    if (moved) {
+                        floating.x = (fromX + dx).coerceIn(0f, maxOf(0, parent.width - floating.width).toFloat())
+                        floating.y = (fromY + dy).coerceIn(0f, maxOf(0, parent.height - floating.height).toFloat())
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (moved) preferences.edit().putFloat("x", floating.x / maxOf(1, parent.width - floating.width)).putFloat("y", floating.y / maxOf(1, parent.height - floating.height)).apply()
+                    else view.performClick()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> true
+                else -> false
+            }
+        }
+        videoFab.setOnTouchListener(touch); imageFab.setOnTouchListener(touch)
+        parent.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (preferences.contains("x")) {
+                floating.x = preferences.getFloat("x", 1f).coerceIn(0f, 1f) * maxOf(0, parent.width - floating.width)
+                floating.y = preferences.getFloat("y", .9f).coerceIn(0f, 1f) * maxOf(0, parent.height - floating.height)
+            }
+        }
+    }
+
+    private fun startDownloads() {
+        runCatching { startForegroundService(Intent(this, BrowserDownloadService::class.java)) }.onFailure {
+            toast("系统暂不允许后台下载，请保持应用在前台并点击继续")
+            io.execute {
+                val repository = DownloadRepository.get(this)
+                repository.all().filter { it.state in activeStates }.forEach { task -> repository.update(task.id) { old -> old.copy(state = TaskState.PAUSED, error = "系统暂不允许启动下载服务") } }
+            }
+        }
+    }
+    private fun previewTask(task: DownloadTask) {
+        if (task.variant.blockedReason.isNotEmpty()) { toast(task.variant.blockedReason); return }
+        startActivity(Intent(this, PlayerActivity::class.java).putExtra("preview", DownloadRepository.encode(task).toString()))
+    }
+    private fun openDownloaded(task: DownloadTask) {
+        val file = File(DownloadRepository.get(this).folder(task.id), task.output)
+        if (!file.exists()) { toast("本地文件已不存在"); return }
+        if (task.variant.kind == MediaKind.IMAGE) {
+            val dialog = Dialog(this)
+            val layout = column()
+            layout.addView(action("关闭图片") { dialog.dismiss() })
+            val image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; contentDescription = task.title }
+            layout.addView(image, LinearLayout.LayoutParams(-1, 0, 1f))
+            dialog.setContentView(layout); dialog.show(); dialog.window?.setLayout(-1, (resources.displayMetrics.heightPixels * .9).toInt())
+            io.execute {
+                val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeFile(file.path, options)
+                options.inSampleSize = 1
+                while (options.outWidth / options.inSampleSize > 2048 || options.outHeight / options.inSampleSize > 2048) options.inSampleSize *= 2
+                options.inJustDecodeBounds = false
+                val bitmap = android.graphics.BitmapFactory.decodeFile(file.path, options)
+                runOnUiThread { if (dialog.isShowing) image.setImageBitmap(bitmap) }
+            }
+        } else startActivity(Intent(this, PlayerActivity::class.java).putExtra("task", task.id))
+    }
+
+    private fun shareDownloaded(task: DownloadTask) {
+        io.execute {
+            val result = runCatching { shareFile(task) }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                result.onSuccess { file ->
+                    val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+                    startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                        type = if (task.variant.kind == MediaKind.HLS) "application/zip" else task.variant.mime.ifBlank { if (task.variant.kind == MediaKind.IMAGE) "image/*" else "video/*" }
+                        putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        clipData = android.content.ClipData.newRawUri(task.title, uri)
+                    }, if (task.variant.kind == MediaKind.HLS) "分享 HLS 离线资源包（ZIP，非 MP4）" else "分享媒体文件"))
+                }.onFailure { toast("无法分享文件，请检查本地文件和存储空间") }
+            }
+        }
+    }
+    private fun shareFile(task: DownloadTask): File {
+        val folder = DownloadRepository.get(this).folder(task.id)
+        val file = File(folder, task.output)
+        require(file.exists()) { "本地文件不存在" }
+        if (task.variant.kind != MediaKind.HLS) return file
+        val archive = File(folder, "offline-package.zip")
+        val temporary = File(folder, "export.part")
+        java.util.zip.ZipOutputStream(temporary.outputStream().buffered()).use { zip ->
+            folder.listFiles()?.filter { it.name == task.output || it.name.matches(Regex("part-[0-9]+\\.bin")) }?.sortedBy { it.name }?.forEach { part ->
+                zip.putNextEntry(java.util.zip.ZipEntry(part.name)); part.inputStream().use { it.copyTo(zip) }; zip.closeEntry()
+            }
+        }
+        if (archive.exists()) archive.delete()
+        require(temporary.renameTo(archive))
+        return archive
+    }
+    private fun exportDownloaded(task: DownloadTask) {
+        exportTaskId = task.id
+        val hls = task.variant.kind == MediaKind.HLS
+        if (hls) toast("HLS 将导出为离线资源包 ZIP，解压后可播放，非单个 MP4")
+        startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = if (hls) "application/zip" else task.variant.mime.ifBlank { "application/octet-stream" }
+            putExtra(Intent.EXTRA_TITLE, safeFileName(task.title, if (hls) "zip" else extension(task.variant)))
+        }, 701)
+    }
+    @Deprecated("Platform Activity result API retained for the native View shell")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 701 && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            val id = exportTaskId ?: return
+            io.execute {
+                val result = runCatching {
+                    val task = DownloadRepository.get(this).get(id) ?: error("下载记录不存在")
+                    val file = shareFile(task)
+                    contentResolver.openOutputStream(uri, "wt")?.use { output -> file.inputStream().use { it.copyTo(output) } } ?: error("无法写入目标位置")
+                }
+                runOnUiThread { if (!isDestroyed) toast(if (result.isSuccess) "导出完成，文件已保存到你选择的位置" else "导出失败，请检查目标位置和存储空间") }
+            }
+        }
+    }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("exportTask", exportTaskId)
+        outState.putInt("section", section)
+        super.onSaveInstanceState(outState)
+    }
+    private fun showDownloadHelp() {
+        AlertDialog.Builder(this).setTitle("下载视频与图片").setMessage("打开网页并播放视频，点击右下方视频或图片入口，选择版本后下载。\n\n普通文件可分享与导出；未加密点播 HLS 保存为可离线播放的资源包，导出为 ZIP。\n\n暂不支持 YouTube、直播、加密 HLS、DRM 和分离音轨的离线下载。部分网站需要在原网页登录后重新检测。\n\n资源数量会随播放和滚动继续增加；未知大小不会显示假百分比。").setPositiveButton("知道了", null).show()
     }
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
     companion object { private const val PANEL_BODY = 10001 }
