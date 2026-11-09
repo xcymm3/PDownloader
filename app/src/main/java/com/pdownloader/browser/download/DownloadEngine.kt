@@ -78,8 +78,8 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
                 throw SourceUnavailable("服务器返回了网页或清单，请回原页重新检测")
             }
             if (task.variant.kind != MediaKind.OTHER) {
-                if (response.mime.startsWith("text/") || response.mime.contains("json")) {
-                    throw SourceUnavailable("服务器返回了文本数据，请回原页重新检测")
+                if (specificMime(response.mime) != null && downloadKind(response.url, response.mime) != task.variant.kind) {
+                    throw SourceUnavailable("服务器返回的内容与资源类型不符，请回原页重新检测")
                 }
             }
             if (response.status == 206) {

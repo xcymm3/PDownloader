@@ -7,6 +7,7 @@ enum class MediaKind {
     VIDEO, IMAGE, HLS, OTHER;
 
     val isVideo get() = this == VIDEO || this == HLS
+    fun canRecoverWith(other: MediaKind) = this == other || isVideo && other.isVideo
 }
 
 data class RequestContext(

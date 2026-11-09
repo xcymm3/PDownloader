@@ -908,7 +908,7 @@ class MainActivity : ThemedActivity() {
         mediaSheet = MediaSheet(this, session, mediaImages, submit = { selected ->
             if (recovery == null) submitDownloads(selected)
             else {
-                val item = selected.singleOrNull()?.takeIf { it.second.kind == recovery.variant.kind }
+                val item = selected.singleOrNull()?.takeIf { recovery.variant.kind.canRecoverWith(it.second.kind) }
                 if (item == null) toast("请选择一个与原任务类型相同的资源")
                 else confirmRecovery(recovery, item.first, item.second)
             }
@@ -946,8 +946,8 @@ class MainActivity : ThemedActivity() {
 
     private fun confirmRecovery(task: DownloadTask, group: MediaGroup, variant: MediaVariant) {
         val context = variant.requestContext ?: group.context
-        val message = if (variant.url == task.variant.url) "会校验原断点或分片，再继续「${task.title}」。"
-            else "将用选中的地址继续原任务「${task.title}」。地址已变化，下载会从头开始。"
+        val message = if (variant.url == task.variant.url && variant.kind == task.variant.kind) "会校验原断点或分片，再继续「${task.title}」。"
+            else "将用选中的资源继续原任务「${task.title}」。地址或格式已变化，下载会从头开始。"
         AlertDialog.Builder(this).setTitle("恢复原下载任务？").setMessage(message)
             .setNegativeButton("取消", null)
             .setPositiveButton("恢复") { _, _ ->

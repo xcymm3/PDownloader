@@ -16,7 +16,7 @@ class MediaHttp(
 ) {
     class HttpFailure(val code: Int) : IOException(when (code) {
         401 -> "需要登录，请打开原网页登录后重试"
-        403 -> "服务器拒绝访问，可能需要登录或链接已过期"
+        403 -> "服务器拒绝访问，可能是权限或请求条件变化，请打开原页"
         404, 410 -> "资源不存在或链接已过期，请打开原网页重新检测"
         else -> "服务器返回 HTTP $code"
     })

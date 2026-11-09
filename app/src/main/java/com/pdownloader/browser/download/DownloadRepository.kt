@@ -113,12 +113,12 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
 
     @Synchronized internal fun recover(id: String, variant: MediaVariant, context: RequestContext): Boolean {
         val previous = get(id) ?: return false
-        if (previous.state != TaskState.FAILED || previous.variant.kind != variant.kind ||
+        if (previous.state != TaskState.FAILED || !previous.variant.kind.canRecoverWith(variant.kind) ||
             variant.blockedReason.isNotEmpty() || !webUrl(variant.url)) return false
         val dedup = stableId(variant.id + previous.context.pageUrl)
         if (readableDatabase.rawQuery("SELECT 1 FROM tasks WHERE dedup=? AND id!=? AND state!=? LIMIT 1",
                 arrayOf(dedup, id, TaskState.CANCELLED.name)).use { it.moveToFirst() }) return false
-        val changedUrl = previous.variant.url != variant.url
+        val changedUrl = previous.variant.url != variant.url || previous.variant.kind != variant.kind
         val task = previous.copy(
             variant = variant.copy(requestContext = null), context = context.copy(pageUrl = previous.context.pageUrl),
             state = TaskState.QUEUED, failure = null, error = "",
