@@ -2,9 +2,10 @@ package com.pdownloader.browser
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
+import android.content.res.ColorStateList
 import android.graphics.Typeface
+import android.graphics.drawable.RippleDrawable
+import android.net.Uri
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
@@ -13,11 +14,15 @@ import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
-import android.widget.PopupMenu
-import java.text.DateFormat
-import java.util.Date
+import java.time.DayOfWeek
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.temporal.TemporalAdjusters
 import java.util.concurrent.Executor
 
 /** Hallmark · pre-emit critique: P4 H4 E4 S5 R5 V4. An independent native page, not a dialog. */
@@ -33,6 +38,8 @@ open class HistoryView(
     private val bookmarks = table == "bookmarks"
     private var all = emptyList<PageRecord>()
     private var displayed = emptyList<PageRecord>()
+    private var dayHeaders = emptyMap<Long, String>()
+    private val clockFormat = DateTimeFormatter.ofPattern("HH:mm")
     private var request = 0
     private var closed = false
     private var active = false
@@ -47,41 +54,50 @@ open class HistoryView(
         override fun getItemId(position: Int) = getItem(position).id
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
             val record = getItem(position)
-            val wrapper = FrameLayout(activity).apply { setPadding(0, 0, 0, activity.dp(8)) }
-            val row = activity.row().apply {
-                background = activity.shape(R.color.history_card, 20)
-                setPadding(activity.dp(8), activity.dp(12), activity.dp(4), activity.dp(12))
+            val wrapper = activity.column().apply { setPadding(0, 0, 0, activity.dp(8)) }
+            dayHeaders[record.id]?.let { heading ->
+                wrapper.addView(activity.label(heading, 13f, true).apply {
+                    setPadding(activity.dp(4), 0, 0, 0)
+                    typeface = Typeface.DEFAULT_BOLD
+                    androidx.core.view.ViewCompat.setAccessibilityHeading(this, true)
+                }, LayoutParams(-1, activity.dp(34)))
             }
-            row.addView(BrowserIcon(activity, "globe", "") {}.apply {
-                isClickable = false; isFocusable = false; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                background = null; glyphSizeDp = 28
-            }, LayoutParams(activity.dp(44), activity.dp(48)))
+            val row = activity.row().apply {
+                background = RippleDrawable(ColorStateList.valueOf(activity.color(R.color.accent_surface)), activity.shape(R.color.history_card, 20), null)
+                setPadding(activity.dp(8), activity.dp(12), activity.dp(4), activity.dp(12))
+                isClickable = true; isFocusable = true
+                contentDescription = "${record.title}，${record.url}"
+                setOnClickListener {
+                    if (isSelected) return@setOnClickListener
+                    isSelected = true
+                    background = activity.shape(R.color.accent_surface, 20)
+                    animate().scaleX(.98f).scaleY(.98f).setDuration(110).withEndAction {
+                        if (active && !closed && isAttachedToWindow) open(record.url)
+                    }.start()
+                }
+            }
+            val avatar = FrameLayout(activity).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+            val siteIcon = record.favicon
+            val face = if (siteIcon != null) ImageView(activity).apply { setImageBitmap(siteIcon); scaleType = ImageView.ScaleType.FIT_CENTER }
+            else activity.label(Uri.parse(record.url).host?.removePrefix("www.")?.firstOrNull()?.uppercase() ?: "•", 15f).apply {
+                gravity = Gravity.CENTER
+                typeface = Typeface.DEFAULT_BOLD
+                background = activity.shape(R.color.home_search, 10)
+            }
+            avatar.addView(face, FrameLayout.LayoutParams(activity.dp(28), activity.dp(28), Gravity.CENTER))
+            row.addView(avatar, LayoutParams(activity.dp(44), activity.dp(48)))
             val text = activity.column().apply {
-                isClickable = true; isFocusable = true; contentDescription = "${record.title}，${record.url}"
-                setOnClickListener { open(record.url) }
                 addView(activity.label(record.title, 16f).apply {
                     setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END
                     typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 })
                 addView(activity.label(record.url, 12f, true).apply { setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, activity.dp(4), 0, 0) })
-                if (!bookmarks) addView(activity.label(time(record.visitedAt), 11f, true).apply { setPadding(0, activity.dp(3), 0, 0) })
+                val time = Instant.ofEpochMilli(record.visitedAt).atZone(ZoneId.systemDefault()).format(clockFormat)
+                addView(activity.label(time, 11f, true).apply { setPadding(0, activity.dp(3), 0, 0) })
             }
             row.addView(text, LayoutParams(0, -2, 1f))
-            val anchor = BrowserIcon(activity, "menu", "历史记录操作：${record.title}") {}
-            anchor.setOnClickListener {
-                PopupMenu(activity, anchor).apply {
-                    menu.add(0, 0, 0, "打开网页"); menu.add(0, 1, 1, "复制链接"); menu.add(0, 2, 2, "删除记录")
-                    setOnMenuItemClickListener {
-                        when (it.itemId) {
-                            0 -> open(record.url)
-                            1 -> (activity.getSystemService(Activity.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText(record.title, record.url))
-                            2 -> deleteRecord(record.id)
-                        }; true
-                    }
-                }.show()
-            }
-            row.addView(anchor, LayoutParams(activity.dp(40), activity.dp(48)))
-            wrapper.addView(row, FrameLayout.LayoutParams(-1, -2))
+            row.addView(BrowserIcon(activity, "delete", "删除 ${record.title}") { confirmDelete(record) }, LayoutParams(activity.dp(48), activity.dp(48)))
+            wrapper.addView(row, LayoutParams(-1, -2))
             return wrapper
         }
     }
@@ -134,6 +150,12 @@ open class HistoryView(
     // Called only after confirmation in the UI; also usable by native integration checks.
     fun clearRecords() { check(!bookmarks); read { store.clearHistory(); store.list(table) } }
 
+    private fun confirmDelete(record: PageRecord) {
+        AlertDialog.Builder(activity).setTitle(if (bookmarks) "删除这条收藏？" else "删除这条历史记录？")
+            .setMessage(record.title).setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ -> deleteRecord(record.id) }.show()
+    }
+
     private fun confirmClear() {
         AlertDialog.Builder(activity).setTitle("清空全部浏览历史？").setMessage("此操作无法撤销，收藏夹将保留。")
             .setNegativeButton("取消", null).setPositiveButton("清空") { _, _ -> clearRecords() }.show()
@@ -156,6 +178,16 @@ open class HistoryView(
     private fun filter() {
         val text = query.trim()
         displayed = all.filter { text.isEmpty() || it.title.contains(text, true) || it.url.contains(text, true) }
+        val zone = ZoneId.systemDefault()
+        val today = LocalDate.now(zone)
+        dayHeaders = buildMap {
+            var previous: LocalDate? = null
+            for (record in displayed) {
+                val day = Instant.ofEpochMilli(record.visitedAt).atZone(zone).toLocalDate()
+                if (day != previous) put(record.id, historyDayLabel(day, today))
+                previous = day
+            }
+        }
         adapter.notifyDataSetChanged()
         list.visibility = if (displayed.isEmpty()) View.GONE else View.VISIBLE
         empty.visibility = if (displayed.isEmpty()) View.VISIBLE else View.GONE
@@ -163,13 +195,17 @@ open class HistoryView(
         status.text = if (text.isEmpty()) "共 ${all.size} 条记录" else "找到 ${displayed.size} 条记录"
         status.setOnClickListener(null); clear.isEnabled = all.isNotEmpty()
     }
-    private fun time(at: Long): String {
-        val delta = (System.currentTimeMillis() - at).coerceAtLeast(0)
-        return when {
-            delta < 60000 -> "刚刚"
-            delta < 3600000 -> "${delta / 60000} 分钟前"
-            delta < 86400000 -> "${delta / 3600000} 小时前"
-            else -> DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(at))
-        }
+}
+
+internal fun historyDayLabel(day: LocalDate, today: LocalDate): String {
+    val date = "${day.year}年${day.monthValue}月${day.dayOfMonth}日"
+    val prefix = when {
+        day == today -> "今天"
+        day == today.minusDays(1) -> "昨天"
+        day > today -> return date
+        day >= today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)) -> "本周"
+        day > today.minusDays(7) -> "最近一周"
+        else -> "一周前"
     }
+    return "$prefix - $date"
 }

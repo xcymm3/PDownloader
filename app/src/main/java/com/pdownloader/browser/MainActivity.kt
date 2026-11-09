@@ -362,7 +362,13 @@ class MainActivity : Activity() {
                 if (tab.web !== view) return
                 tab.url = url; tab.title = view.title?.takeIf { it.isNotBlank() } ?: url
                 val title = tab.title
-                if (!tab.failed && AddressResolver.isWebUrl(url)) io.execute { store.save("history", title, url) }
+                if (!tab.failed && AddressResolver.isWebUrl(url)) {
+                    val favicon = view.favicon
+                    io.execute {
+                        store.save("history", title, url)
+                        favicon?.let { runCatching { store.saveIcon(url, it) } }
+                    }
+                }
                 if (tab.id == selectedId) updateToolbar()
                 persistSession()
             }
@@ -398,6 +404,12 @@ class MainActivity : Activity() {
             }
         }
         webChromeClient = object : WebChromeClient() {
+            override fun onReceivedIcon(view: WebView, icon: Bitmap) {
+                val url = view.url ?: return
+                if (tab.web === view && !tab.failed && AddressResolver.isWebUrl(url)) {
+                    io.execute { runCatching { store.saveIcon(url, icon) } }
+                }
+            }
             override fun onProgressChanged(view: WebView, newProgress: Int) {
                 if (tab.id == selectedId && tab.web === view) {
                     this@MainActivity.progress.progress = newProgress

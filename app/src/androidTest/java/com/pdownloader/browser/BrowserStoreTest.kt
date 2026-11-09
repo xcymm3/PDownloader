@@ -39,4 +39,25 @@ class BrowserStoreTest {
         assertEquals(2000, records.size)
         assertTrue(records.any { it.url == "https://example.com/2004" })
     }
+    @Test fun existingRecordsUpgradeAndSharePersistentSiteIcons() {
+        val file = context.getDatabasePath("browser.db")
+        file.parentFile?.mkdirs()
+        android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            for (table in listOf("history", "bookmarks")) {
+                db.execSQL("CREATE TABLE $table (id INTEGER PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL UNIQUE, visited_at INTEGER NOT NULL)")
+                db.execSQL("INSERT INTO $table VALUES (1, '旧记录', 'https://example.com/page', 1)")
+            }
+            db.version = 1
+        }
+        assertNull(store.list("history").single().favicon)
+        val icon = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.MAGENTA)
+        }
+        try { store.saveIcon("https://example.com/another", icon) } finally { icon.recycle() }
+        store.close()
+        store = BrowserStore(context)
+        assertEquals(android.graphics.Color.MAGENTA, store.list("history").single().favicon!!.getPixel(0, 0))
+        store.clearHistory()
+        assertEquals(android.graphics.Color.MAGENTA, store.list("bookmarks").single().favicon!!.getPixel(0, 0))
+    }
 }
