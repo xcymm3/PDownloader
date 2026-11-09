@@ -7,6 +7,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /** Debug-only loopback fixture server. Not packaged in release builds. */
 class FixtureServer(private val context: Context) : Closeable {
@@ -19,7 +20,15 @@ class FixtureServer(private val context: Context) : Closeable {
     @Volatile var beforeSlowBody: ((String) -> Unit)? = null
     init {
         workers.execute {
-            while (running) runCatching { server.accept() }.getOrNull()?.let { socket -> workers.execute { runCatching { serve(socket) }; socket.close() } }
+            while (running) {
+                val socket = runCatching { server.accept() }.getOrNull() ?: break
+                try {
+                    workers.execute { socket.use { runCatching { serve(it) } } }
+                } catch (error: RejectedExecutionException) {
+                    socket.close()
+                    if (running) throw error
+                }
+            }
         }
     }
     private fun serve(socket: Socket) {
