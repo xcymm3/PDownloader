@@ -24,7 +24,8 @@ class HomePageView(
     private val activity: Activity,
     private val navigate: (String) -> Unit,
     bookmarks: () -> Unit,
-    history: () -> Unit
+    history: () -> Unit,
+    suggestions: ((EditText) -> View)? = null
 ) : ScrollView(activity) {
     internal val sites = listOf(
         HomeSite("百度", "https://www.baidu.com/", "baidu"),
@@ -35,6 +36,7 @@ class HomePageView(
         HomeSite("Instagram", "https://www.instagram.com/", "instagram")
     )
     private val search: EditText
+    internal val searchFocused get() = search.hasFocus()
     var query: String
         get() = search.text.toString()
         set(value) { search.setText(value) }
@@ -67,7 +69,9 @@ class HomePageView(
         }
         field.addView(search, LinearLayout.LayoutParams(0, activity.dp(56), 1f))
         field.addView(BrowserIcon(activity, "forward", "打开网址或开始搜索") { submit() }, LinearLayout.LayoutParams(activity.dp(48), activity.dp(56)))
-        body.addView(field, LinearLayout.LayoutParams(-1, activity.dp(56)).apply { topMargin = activity.dp(16); bottomMargin = activity.dp(40) })
+        body.addView(field, LinearLayout.LayoutParams(-1, activity.dp(56)).apply { topMargin = activity.dp(16) })
+        suggestions?.let { body.addView(it(search), LinearLayout.LayoutParams(-1, 0).apply { topMargin = activity.dp(4) }) }
+        body.addView(View(activity), LinearLayout.LayoutParams(-1, activity.dp(40)))
         sites.chunked(3).forEach { rowSites ->
             val row = activity.row()
             rowSites.forEach { site ->

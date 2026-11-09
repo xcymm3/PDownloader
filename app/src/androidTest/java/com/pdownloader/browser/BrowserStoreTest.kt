@@ -33,6 +33,15 @@ class BrowserStoreTest {
         assertTrue(store.list("history").isEmpty())
         assertEquals(1, store.list("bookmarks").size)
     }
+    @Test fun suggestionsMatchTitlesAndUrlsWithoutTreatingWildcardsAsPatterns() {
+        store.save("history", "旅行清单", "https://example.com/travel")
+        store.save("bookmarks", "旅行收藏", "https://example.com/travel")
+        store.save("history", "进度 50%", "https://example.com/status")
+        assertEquals(listOf("收藏"), store.suggest("旅行").map { it.source })
+        assertEquals("https://example.com/travel", store.suggest("EXAMPLE.COM/TRAVEL").single().url)
+        assertEquals("进度 50%", store.suggest("%").single().title)
+        assertTrue(store.suggest("_").isEmpty())
+    }
     @Test fun historyHasABoundedSize() {
         repeat(2005) { store.save("history", "Page $it", "https://example.com/$it") }
         val records = store.list("history")

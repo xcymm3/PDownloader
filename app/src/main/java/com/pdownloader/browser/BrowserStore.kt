@@ -78,6 +78,30 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, "browser.db", n
         }
         return records.map { record -> record.copy(favicon = icons[siteKey(record.url)]) }
     }
+
+    internal fun suggest(query: String): List<AddressSuggestion> {
+        val escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val contains = "%$escaped%"
+        val starts = "$escaped%"
+        return readableDatabase.rawQuery(
+            """
+            SELECT title,url,bookmarked FROM (
+                SELECT title,url,visited_at,1 AS bookmarked FROM bookmarks
+                UNION ALL
+                SELECT title,url,visited_at,0 AS bookmarked FROM history
+            )
+            WHERE title LIKE ? ESCAPE '\' OR url LIKE ? ESCAPE '\'
+            ORDER BY (title LIKE ? ESCAPE '\' OR url LIKE ? ESCAPE '\') DESC, bookmarked DESC, visited_at DESC
+            LIMIT 16
+            """.trimIndent(), arrayOf(contains, contains, starts, starts)
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(AddressSuggestion(
+                    cursor.getString(0), cursor.getString(1), if (cursor.getInt(2) == 1) "收藏" else "历史"
+                ))
+            }.distinctBy { it.url }.take(8)
+        }
+    }
     fun delete(table: String, id: Long) {
         require(table in setOf("bookmarks", "history"))
         writableDatabase.delete(table, "id=?", arrayOf(id.toString()))

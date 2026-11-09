@@ -75,6 +75,7 @@ class MainActivity : ThemedActivity() {
     private lateinit var content: FrameLayout
     private lateinit var placeholder: LinearLayout
     private lateinit var address: EditText
+    private val suggestions by lazy { AddressSuggestions(this, ::suggestAddresses, ::openSuggestion) }
     private lateinit var progress: ProgressBar
     private lateinit var tabsButton: BrowserIcon
     private lateinit var backButton: BrowserIcon
@@ -192,6 +193,9 @@ class MainActivity : ThemedActivity() {
         floating.addView(resourceFab, LinearLayout.LayoutParams(dp(48), dp(48)))
         webArea.addView(floating, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END).apply { setMargins(dp(8), dp(8), dp(12), dp(16)) })
         configureFloating(webArea)
+        webArea.addView(suggestions.bind(address), FrameLayout.LayoutParams(-1, 0, Gravity.TOP).apply {
+            setMargins(dp(12), dp(4), dp(12), 0)
+        })
         browser.addView(webArea, LinearLayout.LayoutParams(-1, 0, 1f))
         // Navigation controls live in the menu. Keep state holders for menu enablement.
         backButton = icon("back", "后退") { goBack() }
@@ -230,6 +234,7 @@ class MainActivity : ThemedActivity() {
 
     fun selectSection(index: Int) {
         browserMenu?.dismiss()
+        if (index != section) hideKeyboard()
         if (bookmarksOpen) { bookmarksOpen = false; bookmarks.hide(); hideKeyboard() }
         if (tabsOpen) { tabsOpen = false; tabOverview.visibility = View.GONE }
         if (historyOpen) { historyOpen = false; history.hide(); hideKeyboard() }
@@ -255,6 +260,24 @@ class MainActivity : ThemedActivity() {
         if (url == null) { address.error = "请输入有效的网址或搜索内容"; return }
         hideKeyboard()
         load(url)
+    }
+
+    private fun suggestAddresses(query: String, deliver: (List<AddressSuggestion>) -> Unit) {
+        val openTabs = tabs.asSequence().filter { AddressResolver.isWebUrl(it.url) &&
+            (it.title.contains(query, ignoreCase = true) || it.url.contains(query, ignoreCase = true)) }
+            .sortedByDescending { it.touched }
+            .map { AddressSuggestion(it.title, it.url, "切换标签", it.id) }
+            .toList()
+        io.execute {
+            val saved = runCatching { store.suggest(query) }.getOrDefault(emptyList())
+            runOnUiThread { if (!isDestroyed) deliver((openTabs + saved).distinctBy { it.url }.take(8)) }
+        }
+    }
+
+    private fun openSuggestion(suggestion: AddressSuggestion) {
+        hideKeyboard()
+        val tab = tabs.find { it.id == suggestion.tabId }
+        if (tab != null) showTab(tab.id) else load(suggestion.url)
     }
 
     private fun hideKeyboard() {
@@ -317,7 +340,7 @@ class MainActivity : ThemedActivity() {
 
     private fun showHome() {
         homePage = HomePageView(this, navigate = { url -> hideKeyboard(); load(url) },
-            bookmarks = { showRecords("bookmarks") }, history = ::openHistory).also {
+            bookmarks = { showRecords("bookmarks") }, history = ::openHistory, suggestions = suggestions::bind).also {
             content.addView(it, FrameLayout.LayoutParams(-1, -1))
         }
     }
@@ -703,6 +726,7 @@ class MainActivity : ThemedActivity() {
             bookmarksOpen -> closeBookmarks()
             tabsOpen -> closeTabs()
             section != 0 -> selectSection(0)
+            address.hasFocus() || homePage?.searchFocused == true -> hideKeyboard()
             current.web?.canGoBack() == true -> current.web?.goBack()
             current.url.isNotEmpty() -> navigateHome()
             else -> { persistSession(); moveTaskToBack(true) }
