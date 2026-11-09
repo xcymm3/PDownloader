@@ -20,6 +20,9 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -45,6 +48,11 @@ import java.io.File
 
 class MainActivity : ThemedActivity() {
     private val updates by lazy { AppUpdateController(this) }
+    private val websiteAccess by lazy {
+        WebsiteAccess(this) { web ->
+            !isFinishing && !isDestroyed && section == 0 && browser.isShown && tabs.isNotEmpty() && current.web === web
+        }
+    }
     private data class Tab(
         val id: String = UUID.randomUUID().toString(),
         var url: String = "", var title: String = "新标签页",
@@ -316,7 +324,10 @@ class MainActivity : ThemedActivity() {
         if (fullView != null) exitFullscreen()
         if (selectedId != id) { mediaSheet?.dismiss(); mediaSheet = null }
         if (id != selectedId) captureTabPreview()
-        tabs.find { it.id == selectedId }?.web?.onPause()
+        tabs.find { it.id == selectedId }?.web?.let {
+            if (id != selectedId) websiteAccess.cancelFor(it)
+            it.onPause()
+        }
         selectedId = id
         current.touched = System.nanoTime()
         homePage = null
@@ -380,6 +391,7 @@ class MainActivity : ThemedActivity() {
             }
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (tab.web !== view) return
+                websiteAccess.cancelFor(view)
                 tab.url = url; tab.failed = false
                 beginProbe(tab, view, url)
                 if (tab.id == selectedId) { clearError(); updateToolbar() }
@@ -430,6 +442,20 @@ class MainActivity : ThemedActivity() {
             }
         }
         webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(view: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean =
+                websiteAccess.chooseFiles(view, callback, params)
+
+            override fun onPermissionRequest(request: PermissionRequest) =
+                websiteAccess.requestMedia(this@apply, request)
+
+            override fun onPermissionRequestCanceled(request: PermissionRequest) = websiteAccess.cancelMedia(request)
+
+            override fun onGeolocationPermissionsShowPrompt(origin: String, callback: GeolocationPermissions.Callback) {
+                websiteAccess.askLocation(this@apply, origin) { allowed -> callback.invoke(origin, allowed, false) }
+            }
+
+            override fun onGeolocationPermissionsHidePrompt() = websiteAccess.hideLocation(this@apply)
+
             override fun onReceivedIcon(view: WebView, icon: Bitmap) {
                 val url = view.url ?: return
                 if (tab.web === view && !tab.failed && AddressResolver.isWebUrl(url)) {
@@ -687,6 +713,7 @@ class MainActivity : ThemedActivity() {
         probe.retire(tab.probeSession)
         tab.probeSession = null
         val view = tab.web ?: return
+        websiteAccess.cancelFor(view)
         tab.state = if (keepState) Bundle().also { view.saveState(it) } else null
         tab.web = null
         (view.parent as? ViewGroup)?.removeView(view)
@@ -751,6 +778,10 @@ class MainActivity : ThemedActivity() {
     }
     override fun onResume() {
         super.onResume()
+        val revoked = websiteAccess.revokedSites()
+        val affected = tabs.filter { it.web != null && secureSite(it.url) in revoked }
+        affected.forEach { release(it, true) }
+        if (affected.any { it.id == selectedId }) showTab(selectedId)
         downloads.refreshDownloadLimit()
         if (tabs.isNotEmpty() && section == 0 && !historyOpen && !bookmarksOpen && !tabsOpen) { current.web?.onResume(); probe.resume() }
         updates.resume(automatic = true)
@@ -820,6 +851,7 @@ class MainActivity : ThemedActivity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == WebsiteAccess.SITE_PERMISSIONS) websiteAccess.onPermissionResult()
         if (requestCode == 702) {
             val add = pendingStoragePermission
             pendingStoragePermission = null
@@ -980,6 +1012,7 @@ class MainActivity : ThemedActivity() {
     @Deprecated("Platform Activity result API retained for the native View shell")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == WebsiteAccess.CHOOSE_FILES) websiteAccess.onFileResult(resultCode, data)
         if (requestCode == 701 && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             val id = exportTaskId ?: return

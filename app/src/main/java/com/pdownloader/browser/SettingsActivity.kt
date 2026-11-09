@@ -116,6 +116,8 @@ class SettingsActivity : ThemedActivity() {
         }
         toggle("下载完成通知", settings.notifyCompletion) { settings.notifyCompletion = it }
         toggle("按流量计费网络下添加任务前提醒", settings.warnOnMetered) { settings.warnOnMetered = it }
+        section("隐私和网站")
+        option("网站权限", "", ::showSitePermissions)
         section("版本更新")
         option("检查更新", "当前版本 ${BuildConfig.VERSION_NAME}", updates::check)
 
@@ -131,6 +133,20 @@ class SettingsActivity : ThemedActivity() {
             isAppearanceLightStatusBars = light
             isAppearanceLightNavigationBars = light
         }
+    }
+
+    private fun showSitePermissions() {
+        val store = SitePermissionStore(this)
+        val grants = store.grants().sortedWith(compareBy({ it.first }, { it.second.ordinal }))
+        val dialog = AlertDialog.Builder(this).setTitle("网站权限").setNegativeButton("关闭", null)
+        if (grants.isEmpty()) dialog.setMessage("暂无已授权的网站。")
+        else dialog.setItems(grants.map { (site, capability) -> "$site\n${capability.label} · 已允许" }.toTypedArray()) { _, index ->
+            val (site, capability) = grants[index]
+            AlertDialog.Builder(this).setTitle("撤销${capability.label}权限？").setMessage(site)
+                .setNegativeButton("取消", null).setPositiveButton("撤销") { _, _ -> store.revoke(site, capability); showSitePermissions() }
+                .show()
+        }
+        dialog.show()
     }
 }
 
