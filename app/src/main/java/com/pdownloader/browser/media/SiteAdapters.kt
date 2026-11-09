@@ -26,6 +26,20 @@ private val VIDEO_PATH = Regex("/video/(BV[0-9A-Za-z]{10}|av[0-9]{1,18})/?")
 private val SHORT_PATH = Regex("/[0-9A-Za-z_-]{2,32}/?")
 private val BVID = Regex("BV[0-9A-Za-z]{10}")
 
+internal fun sameBilibiliVideoPage(first: String, second: String): Boolean {
+    val key = bilibiliVideoPage(first) ?: return false
+    return key == bilibiliVideoPage(second)
+}
+
+private fun bilibiliVideoPage(url: String): Pair<String, Int>? {
+    if (!webUrl(url) || host(url) !in BILI_PAGES) return null
+    val uri = URI(url)
+    val id = VIDEO_PATH.matchEntire(uri.path)?.groupValues?.get(1) ?: return null
+    val partValue = uri.rawQuery.orEmpty().split('&').firstOrNull { it.startsWith("p=") }?.substringAfter('=')
+    val part = if (partValue == null) 1 else partValue.toIntOrNull()?.takeIf { it > 0 } ?: return null
+    return id to part
+}
+
 /** Uses Bilibili's first-party public web playback responses for progressive, single-file versions. */
 internal class BilibiliAdapter(
     private val loadJson: (String, RequestContext) -> JSONObject,
@@ -61,13 +75,10 @@ internal class BilibiliAdapter(
                 val secureUrl = "https://" + url.substringAfter("://")
                 resolveShort(secureUrl, RequestContext(secureUrl, userAgent))
             } else url
-            val page = if (webUrl(resolved) && host(resolved) in BILI_PAGES) URI(resolved) else return fallback("短链接未指向支持的视频页面")
-            val id = VIDEO_PATH.matchEntire(page.path)?.groupValues?.get(1) ?: return fallback("链接未指向支持的视频页面")
-            val partValue = page.rawQuery.orEmpty().split('&').firstOrNull { it.startsWith("p=") }?.substringAfter('=')
-            val part = if (partValue == null) 1 else partValue.toIntOrNull()?.takeIf { it > 0 }
-                ?: return fallback("无法识别视频分 P")
+            val (id, part) = bilibiliVideoPage(resolved) ?: return fallback("链接未指向支持的视频页面")
             val key = if (id.startsWith("BV")) "bvid=$id" else "aid=${id.removePrefix("av")}"
-            val apiContext = RequestContext(resolved, userAgent, credentialOrigin = origin(BILI_API))
+            val apiContext = RequestContext(resolved, userAgent, referer = resolved.substringBefore('?').substringBefore('#'),
+                credentialOrigin = origin(BILI_API))
             val metadata = data(loadJson("$BILI_API/x/web-interface/view?$key", apiContext))
                 ?: return fallback("未找到视频信息")
             val bvid = metadata.optString("bvid").takeIf(BVID::matches) ?: return fallback("未找到视频编号")

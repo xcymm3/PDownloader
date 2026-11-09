@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pdownloader.browser.media.BilibiliAdapter
 import com.pdownloader.browser.media.ShareMedia
 import com.pdownloader.browser.media.SiteAdapter
+import com.pdownloader.browser.media.sameBilibiliVideoPage
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -35,6 +36,8 @@ class ShareRecognitionTest {
             }
         }, resolveShort = { _, _ -> page })
         assertTrue(adapter.matches(page))
+        assertTrue(sameBilibiliVideoPage(page, "https://m.bilibili.com/video/BV1xx411c7mD/?share_source=copy&p=2"))
+        assertFalse(sameBilibiliVideoPage(page, "https://m.bilibili.com/video/BV1xx411c7mD/"))
         assertFalse(adapter.matches("https://bilibili.com.example/video/BV1xx411c7mD/"))
         val result = adapter.recognize("https://b23.tv/fixture", "FixtureAgent") as ShareMedia.Found
         assertEquals(page, result.page)

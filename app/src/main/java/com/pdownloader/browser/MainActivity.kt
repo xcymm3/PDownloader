@@ -779,8 +779,11 @@ class MainActivity : ThemedActivity() {
                 repository.get(id)?.takeIf { it.state == TaskState.FAILED }?.let { tab to it }
             }
             runOnUiThread {
-                if (!isDestroyed) tasks.forEach { (tab, task) ->
-                    if (tabs.any { it === tab } && tab.recovery == null) tab.recovery = task
+                if (!isDestroyed) {
+                    tasks.forEach { (tab, task) ->
+                        if (tabs.any { it === tab } && tab.recovery == null) tab.recovery = task
+                    }
+                    persistSession()
                 }
             }
         }
@@ -934,8 +937,11 @@ class MainActivity : ThemedActivity() {
             else "打开原资源后，选择右下角资源图标恢复任务")
     }
 
-    private fun recoveryFor(page: String): DownloadTask? = current.recovery?.takeIf {
-        origin(page).isNotEmpty() && origin(page) == origin(it.context.pageUrl)
+    private fun recoveryFor(page: String): DownloadTask? = current.recovery?.takeIf { task ->
+        val original = task.context.pageUrl
+        val site = origin(page)
+        site.isNotEmpty() && (site == origin(original) || sameBilibiliVideoPage(page, original) ||
+            original.startsWith("http://", true) && site == origin("https://" + original.substringAfter("://")))
     }
 
     private fun confirmRecovery(task: DownloadTask, group: MediaGroup, variant: MediaVariant) {
