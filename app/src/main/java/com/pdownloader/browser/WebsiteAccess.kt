@@ -160,6 +160,7 @@ internal class WebsiteAccess(private val activity: Activity, private val isActiv
     }
 
     fun onPermissionResult() {
+        if (!systemInFlight) return
         systemInFlight = false
         pending?.let { finish(it, it.capabilities.all { capability -> capability.isGranted(activity) }) }
     }
