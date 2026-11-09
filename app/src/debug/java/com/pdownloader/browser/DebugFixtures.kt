@@ -16,6 +16,7 @@ class FixtureServer(private val context: Context) : Closeable {
     val base = "http://127.0.0.1:${server.localPort}"
     val requests = CopyOnWriteArrayList<Pair<String, Map<String, String>>>()
     @Volatile var rejectSegment = false
+    @Volatile var beforeSlowBody: ((String) -> Unit)? = null
     init {
         workers.execute {
             while (running) runCatching { server.accept() }.getOrNull()?.let { socket -> workers.execute { runCatching { serve(socket) }; socket.close() } }
@@ -80,6 +81,7 @@ class FixtureServer(private val context: Context) : Closeable {
         output.write("HTTP/1.1 $status ${if (status == 200) "OK" else "Result"}\r\nContent-Type: $mime\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n$extra\r\n".toByteArray())
         if (method != "HEAD") {
             if (path == "/slow.mp4") {
+                beforeSlowBody?.invoke(first[1])
                 bytes.asList().chunked(2048).forEach { chunk -> output.write(chunk.toByteArray()); output.flush(); Thread.sleep(60) }
             } else output.write(bytes)
         }

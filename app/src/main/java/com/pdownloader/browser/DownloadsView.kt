@@ -56,6 +56,7 @@ class DownloadsView(
     private var refreshing = false
     private val heading = activity.label(if (completedPage) "已下载" else "下载中", 25f)
     private val bulk = activity.row()
+    private val downloadSettings = DownloadSettings(activity)
     private val filters = activity.row()
     private val empty = activity.label("暂无下载任务", 16f, true).apply { gravity = Gravity.CENTER }
     private val list = ListView(activity)
@@ -137,7 +138,13 @@ class DownloadsView(
                 val paused = task.state !in activeStates
                 stateRow.addView(BrowserIcon(activity, if (paused) "play" else "pause", if (paused) "继续下载" else "暂停下载") {
                     io.execute {
-                        repository.update(task.id) { it.copy(state = if (paused) TaskState.QUEUED else TaskState.PAUSED, error = "") }
+                        repository.update(task.id) { current ->
+                            when {
+                                paused && current.state in setOf(TaskState.PAUSED, TaskState.FAILED) -> current.copy(state = TaskState.QUEUED, error = "")
+                                !paused && current.state in activeStates -> current.copy(state = TaskState.PAUSED, error = "")
+                                else -> current
+                            }
+                        }
                         if (paused) main.post { start() }
                     }
                 }, LayoutParams(activity.dp(48), activity.dp(48)))
@@ -183,9 +190,20 @@ class DownloadsView(
             })
         }
         addView(search, LayoutParams(-1, activity.dp(48)).apply { setMargins(activity.dp(16), activity.dp(8), activity.dp(16), activity.dp(8)) })
-        bulk.gravity = Gravity.END
-        bulk.addView(BrowserIcon(activity, "pause", "暂停全部下载") { io.execute { repository.all().filter { it.state in activeStates }.forEach { task -> repository.update(task.id) { it.copy(state = TaskState.PAUSED) } } } }, LayoutParams(activity.dp(48), activity.dp(48)))
-        bulk.addView(BrowserIcon(activity, "play", "继续全部下载") { io.execute { repository.all().filter { it.state in setOf(TaskState.PAUSED, TaskState.FAILED) }.forEach { task -> repository.update(task.id) { it.copy(state = TaskState.QUEUED, error = "") } }; main.post { start() } } }, LayoutParams(activity.dp(48), activity.dp(48)))
+        if (!completedPage) {
+            val setting = activity.action(parallelDownloadLabel()) {}
+            setting.setOnClickListener { showParallelDownloadOptions(setting) }
+            bulk.addView(setting, LayoutParams(0, activity.dp(48), 1f).apply { marginStart = activity.dp(16) })
+        }
+        bulk.addView(BrowserIcon(activity, "pause", "暂停全部下载") {
+            io.execute { updateTasks(activeStates, TaskState.PAUSED) }
+        }, LayoutParams(activity.dp(48), activity.dp(48)))
+        bulk.addView(BrowserIcon(activity, "play", "继续全部下载") {
+            io.execute {
+                updateTasks(setOf(TaskState.PAUSED, TaskState.FAILED), TaskState.QUEUED)
+                main.post { start() }
+            }
+        }, LayoutParams(activity.dp(48), activity.dp(48)))
         addView(bulk)
         filters.setPadding(activity.dp(12), activity.dp(4), activity.dp(12), activity.dp(4))
         listOf(DownloadCategory.VIDEO, DownloadCategory.IMAGE).forEach { category ->
@@ -222,6 +240,28 @@ class DownloadsView(
         if (dirty) refresh(force = true)
     }
     fun hide() { visiblePage = false }
+    private fun parallelDownloadLabel() = activity.getString(R.string.parallel_download_limit, downloadSettings.parallelDownloads)
+
+    private fun showParallelDownloadOptions(setting: TextView) {
+        val options = (1..DownloadSettings.MAX_PARALLEL_DOWNLOADS).map { activity.getString(R.string.parallel_download_limit, it) }
+        AlertDialog.Builder(activity)
+            .setTitle(R.string.parallel_download_title)
+            .setSingleChoiceItems(options.toTypedArray(), downloadSettings.parallelDownloads - 1) { dialog, index ->
+                downloadSettings.parallelDownloads = index + 1
+                setting.text = parallelDownloadLabel()
+                dialog.dismiss()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun updateTasks(from: Set<TaskState>, to: TaskState) {
+        repository.all().filter { it.state in from }.forEach { task ->
+            repository.update(task.id) { current ->
+                if (current.state in from) current.copy(state = to, error = "") else current
+            }
+        }
+    }
     fun setCategory(category: DownloadCategory) { selectedCategory = if (category == DownloadCategory.ALL) DownloadCategory.VIDEO else category; updateCategoryButtons(); applyFilter() }
     private fun updateCategoryButtons() {
         filterButtons.forEach { (category, button) ->

@@ -2,16 +2,20 @@ package com.pdownloader.browser.download
 
 import com.pdownloader.browser.media.*
 import java.io.File
-import java.io.IOException
 
-/** Runs one task at a time in the foreground service. UI ownership never owns the transfer. */
+/** Each worker owns its engine and progress throttle for one transfer. */
 class DownloadEngine(private val repository: DownloadRepository, private val http: MediaHttp, private val stopped: () -> Boolean = { false }) {
     class Stopped : Exception()
     private var lastProgress = 0L
 
     fun run(id: String) {
-        val task = repository.get(id) ?: return
-        if (task.state != TaskState.QUEUED) return
+        var claimed: DownloadTask? = null
+        repository.update(id) { task ->
+            if (task.state == TaskState.QUEUED && !stopped()) {
+                task.copy(state = TaskState.CONNECTING, error = "").also { claimed = it }
+            } else task
+        }
+        val task = claimed ?: return
         try {
             repository.folder(id).mkdirs()
             var attempt = 0
@@ -30,11 +34,11 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
                 }
             }
         } catch (_: Stopped) {
-            if (repository.get(id)?.state in setOf(null, TaskState.CANCELLED)) repository.folder(id).deleteRecursively()
+            // The task already has the requested state, including QUEUED after a quick resume.
         } catch (error: Exception) {
             change(id) { it.copy(state = TaskState.FAILED, error = message(error)) }
         } finally {
-            if (repository.get(id)?.state == TaskState.CANCELLED) repository.folder(id).deleteRecursively()
+            if (repository.get(id)?.state in setOf(null, TaskState.CANCELLED)) repository.folder(id).deleteRecursively()
         }
     }
 
@@ -75,8 +79,10 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
             check(id)
             val mimeVariant = task.variant.copy(mime = response.mime.ifEmpty { task.variant.mime })
             val output = File(folder, safeFileName(task.title, extension(mimeVariant)))
-            require(partial.renameTo(output)) { "无法发布下载文件，请检查存储空间" }
-            change(id) { it.copy(state = TaskState.COMPLETE, downloaded = copied, total = copied, output = output.name, variant = mimeVariant, error = "") }
+            change(id) {
+                require(partial.renameTo(output)) { "无法发布下载文件，请检查存储空间" }
+                it.copy(state = TaskState.COMPLETE, downloaded = copied, total = copied, output = output.name, variant = mimeVariant, error = "")
+            }
         }
     }
 
@@ -134,13 +140,15 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         val temporary = File(folder, "offline.tmp")
         temporary.writeText(playlist.localLines.joinToString("\n", postfix = "\n"))
         check(id)
-        require(temporary.renameTo(output)) { "离线清单整理失败" }
-        change(id) { it.copy(state = TaskState.COMPLETE, output = output.name, downloaded = copied, total = copied, error = "") }
+        change(id) {
+            require(temporary.renameTo(output)) { "离线清单整理失败" }
+            it.copy(state = TaskState.COMPLETE, output = output.name, downloaded = copied, total = copied, error = "")
+        }
     }
 
-    private fun check(id: String) { if (stopped() || repository.get(id)?.state !in activeStates) throw Stopped() }
+    private fun check(id: String) { if (stopped() || repository.get(id)?.state !in transferStates) throw Stopped() }
     private fun change(id: String, transform: (DownloadTask) -> DownloadTask) {
-        repository.update(id) { if (it.state in activeStates) transform(it) else it }
+        repository.update(id) { if (!stopped() && it.state in transferStates) transform(it) else it }
     }
     private fun report(id: String, transform: (DownloadTask) -> DownloadTask) {
         val now = System.currentTimeMillis()

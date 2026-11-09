@@ -80,6 +80,45 @@ class MediaDownloadTest {
         val completed = repository.get(task.id)!!
         assertArrayEquals(sample(), File(repository.folder(task.id), completed.output).readBytes())
     }
+    @Test fun parallelDownloadsHonorLiveLimitChangesAndCompleteWithoutDuplicateWriters() {
+        val settings = DownloadSettings(context)
+        val previousLimit = settings.parallelDownloads
+        val gates = List(3) { CountDownLatch(1) }
+        server.beforeSlowBody = { path ->
+            val index = path.substringAfter("parallel=").toInt()
+            check(gates[index].await(15, TimeUnit.SECONDS))
+        }
+        try {
+            settings.parallelDownloads = 2
+            val tasks = gates.indices.map { enqueue("/slow.mp4?parallel=$it") }
+            fun state(index: Int) = repository.get(tasks[index].id)?.state
+            ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
+                scenario.onActivity { it.startForegroundService(Intent(it, BrowserDownloadService::class.java)) }
+                await { state(0) == TaskState.DOWNLOADING && state(1) == TaskState.DOWNLOADING }
+                assertEquals(TaskState.QUEUED, state(2))
+
+                scenario.onActivity { settings.parallelDownloads = 1 }
+                gates[1].countDown()
+                await { state(1) == TaskState.COMPLETE }
+                instrumentation.waitForIdleSync()
+                assertEquals(TaskState.DOWNLOADING, state(0))
+                assertEquals(TaskState.QUEUED, state(2))
+
+                scenario.onActivity { settings.parallelDownloads = 2 }
+                await { state(2) == TaskState.DOWNLOADING }
+                gates.forEach { it.countDown() }
+                await { tasks.indices.all { state(it) == TaskState.COMPLETE } }
+                tasks.forEach { task ->
+                    val output = repository.get(task.id)!!.output
+                    assertArrayEquals(sample(), File(repository.folder(task.id), output).readBytes())
+                }
+                assertEquals(3, server.requests.count { it.first == "/slow.mp4" })
+            }
+        } finally {
+            gates.forEach { it.countDown() }
+            settings.parallelDownloads = previousLimit
+        }
+    }
     @Test fun nativePlayerFullscreenUsesLandscapeAndRestoresItsToolbar() {
         val task = enqueue("/sample.mp4")
         ActivityScenario.launch<PlayerActivity>(Intent(context, PlayerActivity::class.java).putExtra("preview", DownloadRepository.encode(task).toString())).use { scenario ->

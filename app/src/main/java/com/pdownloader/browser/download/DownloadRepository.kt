@@ -16,7 +16,8 @@ enum class TaskState(val label: String) {
     QUEUED("排队中"), CONNECTING("连接中"), DOWNLOADING("下载中"), PAUSED("已暂停"),
     PROCESSING("整理文件"), COMPLETE("已完成"), FAILED("下载失败"), CANCELLED("已取消")
 }
-val activeStates = setOf(TaskState.QUEUED, TaskState.CONNECTING, TaskState.DOWNLOADING, TaskState.PROCESSING)
+internal val transferStates = setOf(TaskState.CONNECTING, TaskState.DOWNLOADING, TaskState.PROCESSING)
+val activeStates = transferStates + TaskState.QUEUED
 
 data class DownloadTask(
     val id: String,
@@ -69,8 +70,15 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
     @Synchronized fun get(id: String): DownloadTask? = readableDatabase.rawQuery("SELECT payload FROM tasks WHERE id=? UNION ALL SELECT payload FROM retained_files WHERE id=? LIMIT 1", arrayOf(id, id)).use {
         if (it.moveToFirst()) decode(it.getString(0)) else null
     }
+    @Synchronized internal fun queuedIds(): List<String> = readableDatabase.query(
+        "tasks", arrayOf("id"), "state=?", arrayOf(TaskState.QUEUED.name), null, null, "created, rowid"
+    ).use { cursor ->
+        buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+    }
     @Synchronized fun update(id: String, transform: (DownloadTask) -> DownloadTask) {
-        val task = get(id)?.let(transform) ?: return
+        val previous = get(id) ?: return
+        val task = transform(previous)
+        if (task == previous) return
         val values = ContentValues().apply { put("state", task.state.name); put("payload", encode(task).toString()) }
         if (writableDatabase.update("tasks", values, "id=?", arrayOf(id)) == 0) {
             writableDatabase.update("retained_files", ContentValues().apply { put("payload", encode(task).toString()) }, "id=?", arrayOf(id))

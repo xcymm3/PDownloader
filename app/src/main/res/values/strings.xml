@@ -11,4 +11,7 @@
     <string name="selection_number">%1$d</string>
     <string name="tabs_count">标签页 · %1$d</string>
     <string name="gesture_seek_time">跳转至 %1$s</string>
+    <string name="parallel_download_title">同时下载数</string>
+    <string name="parallel_download_limit">同时下载 %1$d 项</string>
+    <string name="parallel_download_status">正在同时下载 %1$d 项</string>
 </resources>

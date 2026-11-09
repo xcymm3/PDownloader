@@ -817,7 +817,9 @@ class MainActivity : Activity() {
             toast("系统暂不允许后台下载，请保持应用在前台并点击继续")
             io.execute {
                 val repository = DownloadRepository.get(this)
-                repository.all().filter { it.state in activeStates }.forEach { task -> repository.update(task.id) { old -> old.copy(state = TaskState.PAUSED, error = "系统暂不允许启动下载服务") } }
+                repository.queuedIds().forEach { id -> repository.update(id) { task ->
+                    if (task.state == TaskState.QUEUED) task.copy(state = TaskState.PAUSED, error = "系统暂不允许启动下载服务") else task
+                } }
             }
         }
     }
