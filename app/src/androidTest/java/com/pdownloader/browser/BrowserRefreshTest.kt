@@ -114,8 +114,7 @@ class BrowserRefreshTest {
                 }
                 assertEquals(0, rebounds)
                 val categoryNames = descendants(done).filterIsInstance<TextView>().filter { it.contentDescription?.startsWith("筛选：") == true }.map { it.text.toString() }.toList()
-                assertEquals(2, categoryNames.size)
-                assertFalse(categoryNames.any { it.contains("全部") })
+                assertEquals(listOf("✓ 视频", "图片", "其他"), categoryNames)
             }
         }
     }
@@ -132,6 +131,8 @@ class BrowserRefreshTest {
                     val texts = descendants(activity.window.decorView).filterIsInstance<TextView>().map { it.text.toString() }.toList()
                     assertTrue(texts.any { it.contains("公共下载目录") })
                     assertTrue(texts.any { it.contains("同时下载数") })
+                    assertTrue(texts.any { it.contains("网站权限") })
+                    assertTrue(texts.any { it.contains("清除 Cookie") })
                 }
                 preferences.edit().putString("theme", "LIGHT").apply()
                 scenario.recreate()
