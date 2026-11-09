@@ -49,6 +49,8 @@ import java.io.File
 
 class MainActivity : ThemedActivity() {
     private val updates by lazy { AppUpdateController(this) }
+    private val siteAdapters by lazy { SiteAdapters { android.webkit.CookieManager.getInstance().getCookie(it) } }
+    private val shareRecognition by lazy { ShareRecognition(this, ::showSharedResources, ::openSharedPage) }
     private val websiteAccess by lazy {
         WebsiteAccess(this) { web ->
             !isFinishing && !isDestroyed && section == 0 && browser.isShown && tabs.isNotEmpty() && current.web === web
@@ -757,7 +759,7 @@ class MainActivity : ThemedActivity() {
 
     private fun restoreSession() {
         val preferences = getSharedPreferences("session", MODE_PRIVATE)
-        val pending = mutableMapOf<Tab, String>()
+        val pending = mutableListOf<Pair<Tab, String>>()
         runCatching {
             val values = JSONArray(preferences.getString("tabs", "[]"))
             for (i in 0 until minOf(values.length(), 32)) {
@@ -766,14 +768,14 @@ class MainActivity : ThemedActivity() {
                 val id = value.optString("id").takeIf { it.isNotBlank() && tabs.none { tab -> tab.id == it } } ?: UUID.randomUUID().toString()
                 val tab = Tab(id, url, value.optString("title", "新标签页"))
                 tabs.add(tab)
-                value.optString("recovery").takeIf(String::isNotBlank)?.let { pending[tab] = it }
+                value.optString("recovery").takeIf(String::isNotBlank)?.let { pending.add(tab to it) }
             }
         }
         if (tabs.isEmpty()) tabs.add(Tab())
         selectedId = preferences.getString("selected", null)?.takeIf { id -> tabs.any { it.id == id } } ?: tabs.first().id
         if (pending.isNotEmpty()) io.execute {
             val repository = DownloadRepository.get(this)
-            val tasks = pending.entries.mapNotNull { (tab, id) ->
+            val tasks = pending.mapNotNull { (tab, id) ->
                 repository.get(id)?.takeIf { it.state == TaskState.FAILED }?.let { tab to it }
             }
             runOnUiThread {
@@ -808,15 +810,17 @@ class MainActivity : ThemedActivity() {
     override fun onBackPressed() { goBack() }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); handleIntent(intent) }
     private fun handleIntent(intent: Intent) {
+        shareRecognition.cancel()
         if (intent.action == Intent.ACTION_VIEW) intent.dataString?.takeIf(AddressResolver::isWebUrl)?.let { selectSection(0); newTab(it) }
         if (intent.action == Intent.ACTION_SEND) {
             val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty().take(8192)
-            Regex("https?://[^\\s<>]+", RegexOption.IGNORE_CASE).find(text)?.value?.takeIf(AddressResolver::isWebUrl)?.let { selectSection(0); newTab(it) }
+            Regex("https?://[^\\s<>“”\"，。！？]+", RegexOption.IGNORE_CASE).find(text)?.value?.takeIf(AddressResolver::isWebUrl)?.let(::recognizeShare)
         }
         if (BuildConfig.DEBUG && intent.getBooleanExtra("local_download_fixture", false)) DebugFixtures.url()?.let { selectSection(0); newTab(it) }
         if (intent.hasExtra("section")) selectSection(intent.getIntExtra("section", 0).coerceIn(0, 2))
     }
     override fun onPause() {
+        shareRecognition.cancel()
         updates.pause()
         probe.pause()
         exitFullscreen(); tabs.forEach { it.web?.onPause() }; persistSession(); super.onPause()
@@ -832,9 +836,34 @@ class MainActivity : ThemedActivity() {
         updates.resume(automatic = true)
     }
     override fun onDestroy() {
+        shareRecognition.close()
         browserMenu?.dismiss(); bookmarks.close(); history.close(); completedDownloads.close(); imageGallery?.dismiss(); mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
         exitFullscreen(); tabs.forEach { release(it, false) }; probe.close()
         io.execute { store.close() }; io.shutdown(); super.onDestroy()
+    }
+
+    private fun recognizeShare(url: String) {
+        val adapter = siteAdapters.match(url)
+        if (adapter == null) openSharedPage(url, null)
+        else {
+            mediaSheet?.dismiss()
+            shareRecognition.start(url, android.webkit.WebSettings.getDefaultUserAgent(this), adapter)
+        }
+    }
+
+    private fun openSharedPage(url: String, message: String?) {
+        selectSection(0)
+        if (tabs.size < 32) newTab(url) else load(url)
+        if (message != null) toast("$message，已打开原网页")
+    }
+
+    private fun showSharedResources(originalUrl: String, ua: String, result: ShareMedia.Found) {
+        selectSection(0)
+        hideKeyboard()
+        mediaSheet?.dismiss()
+        val session = ProbeSession("share", result.page, ua, result.title)
+        result.groups.forEach { session.groups[it.id] = it }
+        showResourceSheet(session, false, null, retry = { openSharedPage(originalUrl, null) }, shared = true)
     }
 
     private fun beginProbe(tab: Tab, web: WebView, url: String) {
@@ -869,7 +898,10 @@ class MainActivity : ThemedActivity() {
         val session = current.probeSession ?: run { toast("请先打开网页，并尝试播放视频"); return }
         if (mediaSheet?.isShowing() == true) return
         hideKeyboard()
-        val recovery = recoveryFor(session.pageUrl)
+        showResourceSheet(session, imagesFirst, recoveryFor(session.pageUrl), ::rescan)
+    }
+
+    private fun showResourceSheet(session: ProbeSession, imagesFirst: Boolean, recovery: DownloadTask?, retry: () -> Unit, shared: Boolean = false) {
         mediaSheet = MediaSheet(this, session, mediaImages, submit = { selected ->
             if (recovery == null) submitDownloads(selected)
             else {
@@ -879,7 +911,7 @@ class MainActivity : ThemedActivity() {
             }
         }, previewVideo = { group, variant ->
             previewTask(DownloadTask(java.util.UUID.randomUUID().toString(), group.title, variant, variant.requestContext ?: group.context))
-        }, retry = ::rescan, recoveryTitle = recovery?.title).also { it.show(imagesFirst) }
+        }, retry = retry, recoveryTitle = recovery?.title, shared = shared).also { it.show(imagesFirst) }
     }
 
     private fun openRecovery(task: DownloadTask) {

@@ -27,7 +27,8 @@ class MediaSheet(
     private val submit: (List<Pair<MediaGroup, MediaVariant>>) -> Unit,
     private val previewVideo: (MediaGroup, MediaVariant) -> Unit,
     private val retry: () -> Unit,
-    private val recoveryTitle: String? = null
+    private val recoveryTitle: String? = null,
+    private val shared: Boolean = false
 ) {
     private val dialog = Dialog(activity)
     private val selected = linkedSetOf<String>()
@@ -66,8 +67,11 @@ class MediaSheet(
         handle.setOnClickListener { expanded = !expanded; resize() }
         body.addView(handle, LinearLayout.LayoutParams(-1, activity.dp(20)))
         val top = activity.row()
-        top.addView(activity.label(if (recoveryTitle == null) "本页资源" else "恢复下载", 18f), LinearLayout.LayoutParams(0, activity.dp(48), 1f))
-        top.addView(BrowserIcon(activity, "reload", "重新检测") { dialog.dismiss(); retry() }, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
+        val title = if (shared) "分享链接资源" else if (recoveryTitle == null) "本页资源" else "恢复下载"
+        top.addView(activity.label(title, 18f), LinearLayout.LayoutParams(0, activity.dp(48), 1f))
+        top.addView(BrowserIcon(activity, if (shared) "external" else "reload", if (shared) "打开原网页" else "重新检测") {
+            dialog.dismiss(); retry()
+        }, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
         top.addView(BrowserIcon(activity, "close", "关闭资源面板") { dialog.dismiss() }, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
         body.addView(top)
         val content = activity.column()

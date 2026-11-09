@@ -92,6 +92,7 @@ internal fun downloadKind(url: String, mime: String, fileName: String = ""): Med
 fun extension(variant: MediaVariant): String {
     if (variant.kind == MediaKind.HLS) return "m3u8"
     val mime = variant.mime.substringBefore(';').lowercase()
+    if (mime == "video/x-flv") return "flv"
     val known = mapOf("video/mp4" to "mp4", "video/webm" to "webm", "video/quicktime" to "mov", "video/mp2t" to "ts", "video/x-msvideo" to "avi", "image/jpeg" to "jpg", "image/png" to "png", "image/webp" to "webp", "image/gif" to "gif", "image/avif" to "avif", "image/svg+xml" to "svg")
     return known[mime] ?: runCatching { URI(variant.url).path.substringAfterLast('.').lowercase().takeIf { it in setOf("mp4", "webm", "mov", "mkv", "m4v", "avi", "ts", "jpg", "jpeg", "png", "webp", "gif", "avif", "svg") } }.getOrNull()
         ?: "bin"

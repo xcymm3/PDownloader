@@ -11,7 +11,8 @@ import java.net.URL
 class MediaHttp(
     private val cookieForUrl: (String) -> String? = { null },
     private val allowLocalTests: Boolean = false,
-    private val timeoutMs: Int? = null
+    private val timeoutMs: Int? = null,
+    private val allowedTarget: (String) -> Boolean = { true }
 ) {
     class HttpFailure(val code: Int) : IOException(when (code) {
         401 -> "需要登录，请打开原网页登录后重试"
@@ -31,6 +32,7 @@ class MediaHttp(
     fun open(url: String, context: RequestContext, method: String = "GET", headers: Map<String, String> = emptyMap()): Response {
         var target = url
         repeat(6) {
+            require(allowedTarget(target)) { "识别地址超出站点范围" }
             validateTarget(target)
             val connection = URL(target).openConnection() as HttpURLConnection
             connection.instanceFollowRedirects = false
