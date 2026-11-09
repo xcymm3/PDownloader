@@ -5,9 +5,11 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
+import android.webkit.CookieManager
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
+import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -118,6 +120,7 @@ class SettingsActivity : ThemedActivity() {
         toggle("按流量计费网络下添加任务前提醒", settings.warnOnMetered) { settings.warnOnMetered = it }
         section("隐私和网站")
         option("网站权限", "", ::showSitePermissions)
+        option("清除 Cookie", "", ::confirmClearCookies)
         section("版本更新")
         option("检查更新", "当前版本 ${BuildConfig.VERSION_NAME}", updates::check)
 
@@ -147,6 +150,19 @@ class SettingsActivity : ThemedActivity() {
                 .show()
         }
         dialog.show()
+    }
+
+    private fun confirmClearCookies() {
+        AlertDialog.Builder(this).setTitle("清除所有网站的 Cookie？")
+            .setMessage("网站可能需要重新登录。浏览历史、收藏夹和下载文件会保留。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("清除") { _, _ ->
+                val cookies = CookieManager.getInstance()
+                cookies.removeAllCookies { removed ->
+                    cookies.flush()
+                    if (!isDestroyed) Toast.makeText(this, if (removed) "已清除 Cookie" else "没有可清除的 Cookie", Toast.LENGTH_SHORT).show()
+                }
+            }.show()
     }
 }
 
