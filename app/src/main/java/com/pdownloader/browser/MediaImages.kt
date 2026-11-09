@@ -2,6 +2,7 @@ package com.pdownloader.browser
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.LruCache
@@ -67,18 +68,22 @@ class MediaImages {
         }
     }
     fun loadFile(view: ImageView, file: java.io.File, onResult: (Boolean) -> Unit) {
-        val key = file.path + ":" + file.lastModified()
+        loadUri(view, Uri.fromFile(file), onResult)
+    }
+    fun loadUri(view: ImageView, uri: Uri, onResult: (Boolean) -> Unit) {
+        val resolver = view.context.applicationContext.contentResolver
+        val key = uri.toString()
         view.tag = key
         if (closed) return
         cache.get(key)?.let { view.setImageBitmap(it); onResult(true); return }
         previews.execute {
             val bitmap = runCatching {
                 val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(file.path, options)
+                resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
                 options.inSampleSize = 1
                 while (options.outWidth / options.inSampleSize > 2048 || options.outHeight / options.inSampleSize > 2048) options.inSampleSize *= 2
                 options.inJustDecodeBounds = false
-                BitmapFactory.decodeFile(file.path, options)
+                resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
             }.getOrNull()
             main.post {
                 if (!closed && bitmap != null) cache.put(key, bitmap)
@@ -88,8 +93,10 @@ class MediaImages {
     }
     fun loadDownloaded(view: ImageView, task: com.pdownloader.browser.download.DownloadTask, folder: java.io.File, duration: (Long) -> Unit) {
         val file = java.io.File(folder, task.output)
-        if (task.variant.kind == com.pdownloader.browser.media.MediaKind.IMAGE) { loadFile(view, file) {}; return }
-        val key = "cover:${file.path}:${file.lastModified()}"
+        val context = view.context.applicationContext
+        val uri = com.pdownloader.browser.download.DownloadRepository.get(context).playbackUri(task)
+        if (task.variant.kind == com.pdownloader.browser.media.MediaKind.IMAGE) { loadUri(view, uri) {}; return }
+        val key = "cover:$uri"
         view.tag = key
         cache.get(key)?.let { view.setImageBitmap(it); durations[key]?.let(duration); return }
         workers.execute {
@@ -99,7 +106,8 @@ class MediaImages {
                 try {
                     val hls = task.variant.kind == com.pdownloader.browser.media.MediaKind.HLS
                     if (hls && length <= 0) length = file.useLines { lines -> lines.filter { it.startsWith("#EXTINF:") }.sumOf { it.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0 }.times(1000).toLong() }
-                    retriever.setDataSource(if (hls) java.io.File(folder, "part-0.bin").path else file.path)
+                    if (hls) retriever.setDataSource(java.io.File(folder, "part-0.bin").path)
+                    else retriever.setDataSource(context, uri)
                     if (!hls) length = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: length
                     if (android.os.Build.VERSION.SDK_INT >= 27) retriever.getScaledFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 480, 320)
                     else retriever.getFrameAtTime(0)?.let { frame ->

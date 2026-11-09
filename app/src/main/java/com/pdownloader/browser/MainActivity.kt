@@ -1,7 +1,6 @@
 package com.pdownloader.browser
 
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -42,7 +41,7 @@ import com.pdownloader.browser.media.*
 import com.pdownloader.browser.download.*
 import java.io.File
 
-class MainActivity : Activity() {
+class MainActivity : ThemedActivity() {
     private data class Tab(
         val id: String = UUID.randomUUID().toString(),
         var url: String = "", var title: String = "新标签页",
@@ -93,6 +92,7 @@ class MainActivity : Activity() {
     private var imageGallery: ImageGalleryDialog? = null
     private var mediaSheet: MediaSheet? = null
     private var exportTaskId: String? = null
+    private var pendingStoragePermission: (() -> Unit)? = null
     private val probeUi = android.os.Handler(android.os.Looper.getMainLooper())
     private var probeUpdatePending = false
     private var webSeekPosition: SeekPosition? = null
@@ -496,12 +496,10 @@ class MainActivity : Activity() {
                 MenuAction("reload", "刷新网页", hasPage) { current.failed = false; web?.reload() }
             ), listOf(
                 MenuAction("plus", "新建标签页") { newTab() },
-                MenuAction("windows", "所有标签页") { showTabs() },
                 MenuAction("history", "历史记录") { openHistory() },
-                MenuAction("done", "下载内容") { selectSection(2) },
                 MenuAction("star", "收藏夹") { openBookmarks() },
-                MenuAction("search", "在网页中查找", hasPage) { findInPage() },
-                MenuAction("help", "帮助") { showDownloadHelp() }
+                MenuAction("settings", "设置") { startActivity(Intent(this, SettingsActivity::class.java)) },
+                MenuAction("info", "关于") { showAbout() }
             ))
         browserMenu?.show(anchor ?: toolbar.getChildAt(toolbar.childCount - 1))
     }
@@ -510,11 +508,12 @@ class MainActivity : Activity() {
             type = "text/plain"; putExtra(Intent.EXTRA_TEXT, current.url)
         }, "分享网页"))
     }
-    private fun findInPage() {
-        val web = current.web ?: return
-        val input = EditText(this).apply { hint = "查找文字"; setSingleLine(true) }
-        AlertDialog.Builder(this).setTitle("在网页中查找").setView(input).setNegativeButton("取消", null)
-            .setPositiveButton("查找") { _, _ -> web.findAllAsync(input.text.toString()) }.show()
+    private fun showAbout() {
+        val project = "https://github.com/xcymm3/PDownloader"
+        AlertDialog.Builder(this).setTitle("关于 PDownloader")
+            .setMessage("版本 ${BuildConfig.VERSION_NAME}\n作者 xcymm3\n\n$project")
+            .setNegativeButton("关闭", null)
+            .setPositiveButton("打开 GitHub") { _, _ -> load(project) }.show()
     }
 
     private fun bookmark() {
@@ -722,7 +721,11 @@ class MainActivity : Activity() {
         probe.pause()
         exitFullscreen(); tabs.forEach { it.web?.onPause() }; persistSession(); super.onPause()
     }
-    override fun onResume() { super.onResume(); if (tabs.isNotEmpty() && section == 0 && !historyOpen && !bookmarksOpen && !tabsOpen) { current.web?.onResume(); probe.resume() } }
+    override fun onResume() {
+        super.onResume()
+        downloads.refreshDownloadLimit()
+        if (tabs.isNotEmpty() && section == 0 && !historyOpen && !bookmarksOpen && !tabsOpen) { current.web?.onResume(); probe.resume() }
+    }
     override fun onDestroy() {
         browserMenu?.dismiss(); bookmarks.close(); history.close(); completedDownloads.close(); imageGallery?.dismiss(); mediaSheet?.dismiss(); downloads.close(); mediaImages.close()
         exitFullscreen(); tabs.forEach { release(it, false) }; probe.close()
@@ -761,26 +764,60 @@ class MainActivity : Activity() {
         val session = current.probeSession ?: run { toast("请先打开网页，并尝试播放视频"); return }
         if (mediaSheet?.isShowing() == true) return
         hideKeyboard()
-        mediaSheet = MediaSheet(this, session, mediaImages, submit = { snapshot ->
-            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 700)
-            }
-            io.execute {
-                val repository = DownloadRepository.get(this)
-                var added = 0
-                val result = runCatching {
-                    snapshot.forEach { (group, variant) -> if (repository.enqueue(group.title, variant, variant.requestContext ?: group.context, group.thumbnail, group.durationMs).second) added++ }
-                }
-                runOnUiThread {
-                    if (!isDestroyed) {
-                        toast(if (result.isFailure) "已添加 $added 项；部分任务创建失败，请检查存储空间后重试" else if (added > 0) "已加入 $added 个下载任务" else "所选资源已有下载任务，请在下载列表查看")
-                        if (added > 0) startDownloads()
-                    }
-                }
-            }
-        }, previewVideo = { group, variant ->
+        mediaSheet = MediaSheet(this, session, mediaImages, submit = ::submitDownloads, previewVideo = { group, variant ->
             previewTask(DownloadTask(java.util.UUID.randomUUID().toString(), group.title, variant, variant.requestContext ?: group.context))
         }, retry = ::rescan).also { it.show(imagesFirst) }
+    }
+
+    private fun submitDownloads(snapshot: List<Pair<MediaGroup, MediaVariant>>) {
+        val settings = DownloadSettings(this)
+        val saveToPublic = settings.saveToPublic
+        val add = { requestDownloadStorage(saveToPublic) { enqueueDownloads(snapshot, saveToPublic) } }
+        if (settings.warnOnMetered && getSystemService(android.net.ConnectivityManager::class.java).isActiveNetworkMetered) {
+            AlertDialog.Builder(this).setTitle("使用按流量计费的网络？")
+                .setMessage("当前网络可能产生流量费用。")
+                .setNegativeButton("取消", null).setPositiveButton("继续下载") { _, _ -> add() }.show()
+        } else add()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun requestDownloadStorage(public: Boolean, add: () -> Unit) {
+        val permission = android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+        if (public && Build.VERSION.SDK_INT < 29 && checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            pendingStoragePermission = add
+            requestPermissions(arrayOf(permission), 702)
+        } else add()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 702) {
+            val add = pendingStoragePermission
+            pendingStoragePermission = null
+            if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) add?.invoke()
+            else toast("公共下载目录需要存储权限，可在设置中改用应用私有目录")
+        }
+    }
+
+    private fun enqueueDownloads(snapshot: List<Pair<MediaGroup, MediaVariant>>, saveToPublic: Boolean) {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 700)
+        }
+        io.execute {
+            val repository = DownloadRepository.get(this)
+            var added = 0
+            val result = runCatching {
+                snapshot.forEach { (group, variant) ->
+                    if (repository.enqueue(group.title, variant, variant.requestContext ?: group.context, group.thumbnail, group.durationMs, saveToPublic).second) added++
+                }
+            }
+            runOnUiThread {
+                if (!isDestroyed) {
+                    toast(if (result.isFailure) "已添加 $added 项；部分任务创建失败，请检查存储空间后重试" else if (added > 0) "已加入 $added 个下载任务" else "所选资源已有下载任务，请在下载列表查看")
+                    if (added > 0) startDownloads()
+                }
+            }
+        }
     }
 
     private fun rescan() {
@@ -840,19 +877,18 @@ class MainActivity : Activity() {
         startActivity(Intent(this, PlayerActivity::class.java).putExtra("preview", DownloadRepository.encode(task).toString()))
     }
     private fun openDownloaded(task: DownloadTask) {
-        val file = File(DownloadRepository.get(this).folder(task.id), task.output)
-        if (!file.exists()) { toast("本地文件已不存在"); return }
         if (task.variant.kind == MediaKind.IMAGE) {
             io.execute {
                 val repository = DownloadRepository.get(this)
-                val tasks = repository.all().filter { it.state == TaskState.COMPLETE && it.variant.kind == MediaKind.IMAGE && File(repository.folder(it.id), it.output).exists() }
+                val tasks = repository.all().filter { it.state == TaskState.COMPLETE && it.variant.kind == MediaKind.IMAGE && canRead(repository.playbackUri(it)) }
                 runOnUiThread {
-                    if (isDestroyed || tasks.none { it.id == task.id }) return@runOnUiThread
+                    if (isDestroyed) return@runOnUiThread
+                    if (tasks.none { it.id == task.id }) { toast("本地文件已不存在"); return@runOnUiThread }
                     hideKeyboard()
                     imageGallery?.dismiss()
                     lateinit var viewer: ImageGalleryDialog
                     viewer = ImageGalleryDialog(this,
-                        tasks.map { GalleryPicture(it.id, it.title, file = File(repository.folder(it.id), it.output)) },
+                        tasks.map { GalleryPicture(it.id, it.title, uri = repository.playbackUri(it)) },
                         tasks.indexOfFirst { it.id == task.id }, mediaImages,
                         share = { picture -> tasks.find { it.id == picture.id }?.let(::shareDownloaded) },
                         export = { picture -> tasks.find { it.id == picture.id }?.let(::exportDownloaded) },
@@ -865,11 +901,13 @@ class MainActivity : Activity() {
 
     private fun shareDownloaded(task: DownloadTask) {
         io.execute {
-            val result = runCatching { shareFile(task) }
+            val result = runCatching {
+                val source = exportSource(task)
+                if (source.scheme == "file") FileProvider.getUriForFile(this, "$packageName.files", File(requireNotNull(source.path))) else source
+            }
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
-                result.onSuccess { file ->
-                    val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+                result.onSuccess { uri ->
                     startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
                         type = if (task.variant.kind == MediaKind.HLS) "application/zip" else task.variant.mime.ifBlank { if (task.variant.kind == MediaKind.IMAGE) "image/*" else "video/*" }
                         putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -879,21 +917,26 @@ class MainActivity : Activity() {
             }
         }
     }
-    private fun shareFile(task: DownloadTask): File {
-        val folder = DownloadRepository.get(this).folder(task.id)
-        val file = File(folder, task.output)
-        require(file.exists()) { "本地文件不存在" }
-        if (task.variant.kind != MediaKind.HLS) return file
+    private fun canRead(uri: Uri): Boolean = runCatching {
+        contentResolver.openFileDescriptor(uri, "r")?.use { true } == true
+    }.getOrDefault(false)
+
+    private fun exportSource(task: DownloadTask): Uri {
+        val repository = DownloadRepository.get(this)
+        if (task.variant.kind != MediaKind.HLS) return repository.playbackUri(task).also {
+            require(canRead(it)) { "本地文件不存在" }
+        }
+        task.publicUri.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }?.takeIf(::canRead)?.let { return it }
+        val folder = repository.folder(task.id)
         val archive = File(folder, "offline-package.zip")
         val temporary = File(folder, "export.part")
-        java.util.zip.ZipOutputStream(temporary.outputStream().buffered()).use { zip ->
-            folder.listFiles()?.filter { it.name == task.output || it.name.matches(Regex("part-[0-9]+\\.bin")) }?.sortedBy { it.name }?.forEach { part ->
-                zip.putNextEntry(java.util.zip.ZipEntry(part.name)); part.inputStream().use { it.copyTo(zip) }; zip.closeEntry()
-            }
+        try {
+            writeOfflineArchive(folder, task.output, temporary)
+            require(temporary.renameTo(archive))
+            return Uri.fromFile(archive)
+        } finally {
+            temporary.delete()
         }
-        if (archive.exists()) archive.delete()
-        require(temporary.renameTo(archive))
-        return archive
     }
     private fun exportDownloaded(task: DownloadTask) {
         exportTaskId = task.id
@@ -914,8 +957,11 @@ class MainActivity : Activity() {
             io.execute {
                 val result = runCatching {
                     val task = DownloadRepository.get(this).get(id) ?: error("下载记录不存在")
-                    val file = shareFile(task)
-                    contentResolver.openOutputStream(uri, "wt")?.use { output -> file.inputStream().use { it.copyTo(output) } } ?: error("无法写入目标位置")
+                    val source = exportSource(task)
+                    require(source != uri) { "目标与原文件相同" }
+                    checkNotNull(contentResolver.openInputStream(source)).use { input ->
+                        checkNotNull(contentResolver.openOutputStream(uri, "wt")).use { output -> input.copyTo(output) }
+                    }
                 }
                 runOnUiThread { if (!isDestroyed) toast(if (result.isSuccess) "导出完成，文件已保存到你选择的位置" else "导出失败，请检查目标位置和存储空间") }
             }
@@ -932,9 +978,6 @@ class MainActivity : Activity() {
         outState.putInt("section", section)
         outState.putString("downloadCategory", completedDownloads.selectedCategory.name)
         super.onSaveInstanceState(outState)
-    }
-    private fun showDownloadHelp() {
-        AlertDialog.Builder(this).setTitle("下载视频与图片").setMessage("打开网页并播放视频，点击右下方资源图标，选择版本或图片后下载。\n\n图标可长按查看说明；图片预览中轻点关闭、左右滑动切换、双指缩放。\n\n普通文件可分享与导出；未加密点播 HLS 保存为离线资源包，导出为 ZIP。\n\n暂不支持 YouTube、直播、加密 HLS、DRM 和分离音轨的离线下载。部分网站需要在原网页登录后重新检测。").setPositiveButton("知道了", null).show()
     }
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
 }

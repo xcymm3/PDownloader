@@ -15,7 +15,7 @@ internal class BrowserMenu(private val activity: Activity, shortcuts: List<MenuA
         val body = activity.column().apply { background = activity.shape(R.color.menu_surface, 20); clipToOutline = true; setPadding(0, activity.dp(4), 0, activity.dp(8)) }
         val top = activity.row().apply { setPadding(activity.dp(4), 0, activity.dp(4), 0) }
         shortcuts.forEach { action ->
-            top.addView(BrowserIcon(activity, action.icon, action.title) { dismiss(); action.run() }.apply { isEnabled = action.enabled }, LinearLayout.LayoutParams(0, activity.dp(52), 1f))
+            top.addView(BrowserIcon(activity, action.icon, action.title) { dismiss(); action.run() }.apply { isEnabled = action.enabled }, LinearLayout.LayoutParams(0, activity.dp(48), 1f))
         }
         body.addView(top)
         body.addView(View(activity).apply { setBackgroundColor(activity.color(R.color.divider)) }, LinearLayout.LayoutParams(-1, activity.dp(1)))
@@ -30,7 +30,7 @@ internal class BrowserMenu(private val activity: Activity, shortcuts: List<MenuA
         }
         val scroll = ScrollView(activity).apply { addView(body) }
         content = body
-        popup = PopupWindow(scroll, minOf(activity.dp(320), activity.resources.displayMetrics.widthPixels - activity.dp(24)), -2, true).apply {
+        popup = PopupWindow(scroll, minOf(activity.dp(248), activity.resources.displayMetrics.widthPixels - activity.dp(16)), -2, true).apply {
             setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT)); elevation = activity.dp(12).toFloat(); isOutsideTouchable = true
         }
     }

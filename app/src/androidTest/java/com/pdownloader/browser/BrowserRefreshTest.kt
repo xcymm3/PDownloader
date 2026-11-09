@@ -81,6 +81,8 @@ class BrowserRefreshTest {
                 assertFalse(texts.contains("收藏当前网页"))
                 assertFalse(texts.any { it.contains("本页视频") || it.contains("重新检测") || it.contains("下载功能测试") })
                 assertTrue(texts.contains("收藏夹"))
+                assertTrue(texts.containsAll(listOf("设置", "关于")))
+                assertTrue(texts.none { it in listOf("在网页中查找", "下载内容", "所有标签页", "帮助") })
                 listOf("后退", "前进", "刷新网页", "收藏当前网页").forEach { label -> assertTrue(descendants(menu).any { it.contentDescription == label }) }
             }
             capture("browser-menu")
@@ -115,6 +117,30 @@ class BrowserRefreshTest {
                 assertEquals(2, categoryNames.size)
                 assertFalse(categoryNames.any { it.contains("全部") })
             }
+        }
+    }
+
+    @Test fun settingsApplyAppThemeWhenRecreated() {
+        val preferences = context.getSharedPreferences("appearance", 0)
+        val previous = preferences.getString("theme", null)
+        val mask = android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        try {
+            preferences.edit().putString("theme", "DARK").apply()
+            ActivityScenario.launch(SettingsActivity::class.java).use { scenario ->
+                scenario.onActivity { activity ->
+                    assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_YES, activity.resources.configuration.uiMode and mask)
+                    val texts = descendants(activity.window.decorView).filterIsInstance<TextView>().map { it.text.toString() }.toList()
+                    assertTrue(texts.any { it.contains("公共下载目录") })
+                    assertTrue(texts.any { it.contains("同时下载数") })
+                }
+                preferences.edit().putString("theme", "LIGHT").apply()
+                scenario.recreate()
+                scenario.onActivity { activity ->
+                    assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, activity.resources.configuration.uiMode and mask)
+                }
+            }
+        } finally {
+            preferences.edit().putString("theme", previous).apply()
         }
     }
     private fun records(a: MainActivity) = descendants(a.window.decorView).filterIsInstance<HistoryView>().single { it.table == "bookmarks" }

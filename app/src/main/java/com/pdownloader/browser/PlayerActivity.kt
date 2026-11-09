@@ -1,7 +1,6 @@
 package com.pdownloader.browser
 
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.net.Uri
@@ -29,10 +28,9 @@ import androidx.media3.ui.TimeBar
 import com.pdownloader.browser.download.DownloadRepository
 import com.pdownloader.browser.download.TaskState
 import com.pdownloader.browser.media.*
-import java.io.File
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-class PlayerActivity : Activity() {
+class PlayerActivity : ThemedActivity() {
     private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
     private var position = 0L
@@ -110,9 +108,10 @@ class PlayerActivity : Activity() {
         val selected = task ?: return
         val local = selected.state == TaskState.COMPLETE
         val uri = if (local) {
-            val file = File(DownloadRepository.get(this).folder(selected.id), selected.output)
-            if (!file.exists()) { Toast.makeText(this, "本地文件已不存在", Toast.LENGTH_LONG).show(); finish(); return }
-            Uri.fromFile(file)
+            val source = DownloadRepository.get(this).playbackUri(selected)
+            val readable = runCatching { contentResolver.openFileDescriptor(source, "r")?.use { true } == true }.getOrDefault(false)
+            if (!readable) { Toast.makeText(this, "本地文件已不存在", Toast.LENGTH_LONG).show(); finish(); return }
+            source
         } else Uri.parse(selected.variant.url)
         val http = MediaHttp({ CookieManager.getInstance().getCookie(it) }, BuildConfig.DEBUG)
         val factory = DefaultDataSource.Factory(this, DataSource.Factory { BrowserMediaSource(http, selected.context) })

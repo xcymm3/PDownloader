@@ -25,7 +25,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-data class GalleryPicture(val id: String, val title: String, val url: String = "", val file: File? = null, val context: RequestContext? = null)
+data class GalleryPicture(val id: String, val title: String, val url: String = "", val file: File? = null, val context: RequestContext? = null, val uri: android.net.Uri? = null)
 
 /** Shared lightbox for discovered and downloaded images. A single tap closes; pinch zooms. */
 class ImageGalleryDialog(
@@ -128,7 +128,8 @@ class ImageGalleryDialog(
         val result: (Boolean) -> Unit = { ok ->
             if (isShowing) { loading.visibility = View.GONE; error.visibility = if (ok) View.GONE else View.VISIBLE }
         }
-        if (picture.file != null) images.loadFile(image, picture.file, result)
+        if (picture.uri != null) images.loadUri(image, picture.uri, result)
+        else if (picture.file != null) images.loadFile(image, picture.file, result)
         else if (picture.context != null) images.loadPreview(image, picture.url, picture.context, result)
         else { loading.visibility = View.GONE; error.visibility = View.VISIBLE }
     }

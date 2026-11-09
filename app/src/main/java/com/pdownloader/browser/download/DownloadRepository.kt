@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import com.pdownloader.browser.media.*
@@ -33,11 +34,14 @@ data class DownloadTask(
     val validator: String = "",
     val output: String = "",
     val thumbnail: String = "",
-    val durationMs: Long = -1
+    val durationMs: Long = -1,
+    val saveToPublic: Boolean = false,
+    val publicUri: String = ""
 )
 
 class DownloadRepository private constructor(context: Context) : SQLiteOpenHelper(context.applicationContext, "downloads.db", null, 2) {
     private val downloadsRoot = File(context.applicationContext.filesDir, "downloads")
+    internal val publicDownloads = PublicDownloads(context.applicationContext)
     private val handler = Handler(Looper.getMainLooper())
     val listeners = CopyOnWriteArraySet<() -> Unit>()
     override fun onCreate(db: SQLiteDatabase) {
@@ -48,14 +52,14 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) { if (oldVersion < 2) createLibrary(db) }
     private fun createLibrary(db: SQLiteDatabase) { db.execSQL("CREATE TABLE IF NOT EXISTS retained_files (id TEXT PRIMARY KEY, created INTEGER NOT NULL, payload TEXT NOT NULL)") }
 
-    @Synchronized fun enqueue(title: String, variant: MediaVariant, context: RequestContext, thumbnail: String = "", durationMs: Long = -1): Pair<DownloadTask, Boolean> {
+    @Synchronized fun enqueue(title: String, variant: MediaVariant, context: RequestContext, thumbnail: String = "", durationMs: Long = -1, saveToPublic: Boolean = false): Pair<DownloadTask, Boolean> {
         require(variant.blockedReason.isEmpty()) { variant.blockedReason }
         require(webUrl(variant.url)) { "无效的媒体地址" }
         val key = stableId(variant.id + context.pageUrl)
         readableDatabase.rawQuery("SELECT payload FROM tasks WHERE dedup=? AND state!=? LIMIT 1", arrayOf(key, TaskState.CANCELLED.name)).use {
             if (it.moveToFirst()) return decode(it.getString(0)) to false
         }
-        val task = DownloadTask(UUID.randomUUID().toString(), title.take(200), variant, context, thumbnail = thumbnail, durationMs = durationMs)
+        val task = DownloadTask(UUID.randomUUID().toString(), title.take(200), variant, context, thumbnail = thumbnail, durationMs = durationMs, saveToPublic = saveToPublic)
         val values = ContentValues().apply {
             put("id", task.id); put("dedup", key); put("created", System.currentTimeMillis()); put("state", task.state.name); put("payload", encode(task).toString())
         }
@@ -91,7 +95,7 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
     @Synchronized fun forget(id: String, deleteFile: Boolean) {
         val task = get(id) ?: return
         require(task.state !in activeStates) { "请先暂停任务" }
-        if (deleteFile || task.state != TaskState.COMPLETE) folder(id).deleteRecursively()
+        if (deleteFile || task.state != TaskState.COMPLETE) deleteFiles(task)
         writableDatabase.beginTransaction()
         try {
             if (!deleteFile && task.state == TaskState.COMPLETE) {
@@ -106,10 +110,26 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
         } finally { writableDatabase.endTransaction() }
         notifyChange()
     }
+
+    @Synchronized internal fun cancel(id: String) {
+        val task = get(id) ?: return
+        if (task.state == TaskState.COMPLETE) return
+        update(id) { it.copy(state = TaskState.CANCELLED, error = "") }
+        deleteFiles(task)
+        update(id) { it.copy(publicUri = "") }
+    }
+
+    private fun deleteFiles(task: DownloadTask) {
+        task.publicUri.takeIf { it.isNotBlank() }?.let { publicDownloads.delete(Uri.parse(it)) }
+        folder(task.id).deleteRecursively()
+    }
     fun folder(id: String): File {
         require(runCatching { UUID.fromString(id) }.isSuccess) { "无效任务标识" }
         return File(downloadsRoot, id)
     }
+    internal fun playbackUri(task: DownloadTask): Uri =
+        if (task.variant.kind != MediaKind.HLS && task.publicUri.isNotBlank()) Uri.parse(task.publicUri)
+        else Uri.fromFile(File(folder(task.id), task.output))
     private fun notifyChange() { handler.post { listeners.forEach { it() } } }
 
     companion object {
@@ -126,11 +146,12 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
             put("partsDone", task.partsDone); put("partsTotal", task.partsTotal); put("error", task.error)
             put("validator", task.validator); put("output", task.output)
             put("thumbnail", task.thumbnail); put("durationMs", task.durationMs)
+            put("saveToPublic", task.saveToPublic); put("publicUri", task.publicUri)
         }
         fun decode(json: String): DownloadTask = JSONObject(json).let {
             DownloadTask(it.getString("id"), it.getString("title"), MediaVariant(it.getString("url"), MediaKind.valueOf(it.getString("kind")), it.optString("quality"), it.optInt("height"), mime = it.optString("mime")),
                 RequestContext(it.getString("page"), it.optString("ua"), it.optString("referer"), it.optString("credentialOrigin"), it.optString("authorization")),
-                TaskState.valueOf(it.getString("state")), it.optLong("downloaded"), it.optLong("total", -1), it.optInt("partsDone"), it.optInt("partsTotal"), it.optString("error"), it.optString("validator"), it.optString("output"), it.optString("thumbnail"), it.optLong("durationMs", -1))
+                TaskState.valueOf(it.getString("state")), it.optLong("downloaded"), it.optLong("total", -1), it.optInt("partsDone"), it.optInt("partsTotal"), it.optString("error"), it.optString("validator"), it.optString("output"), it.optString("thumbnail"), it.optLong("durationMs", -1), it.optBoolean("saveToPublic"), it.optString("publicUri"))
         }
     }
 }

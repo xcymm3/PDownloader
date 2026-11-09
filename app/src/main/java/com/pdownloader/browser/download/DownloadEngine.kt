@@ -1,5 +1,6 @@
 package com.pdownloader.browser.download
 
+import android.net.Uri
 import com.pdownloader.browser.media.*
 import java.io.File
 
@@ -18,6 +19,10 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         val task = claimed ?: return
         try {
             repository.folder(id).mkdirs()
+            if (task.publicUri.isNotBlank()) {
+                repository.publicDownloads.delete(Uri.parse(task.publicUri))
+                change(id) { it.copy(publicUri = "") }
+            }
             var attempt = 0
             while (true) {
                 check(id)
@@ -79,9 +84,18 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
             check(id)
             val mimeVariant = task.variant.copy(mime = response.mime.ifEmpty { task.variant.mime })
             val output = File(folder, safeFileName(task.title, extension(mimeVariant)))
-            change(id) {
-                require(partial.renameTo(output)) { "无法发布下载文件，请检查存储空间" }
+            val completed: (DownloadTask) -> DownloadTask = {
                 it.copy(state = TaskState.COMPLETE, downloaded = copied, total = copied, output = output.name, variant = mimeVariant, error = "")
+            }
+            if (task.saveToPublic) {
+                val mime = mimeVariant.mime.takeUnless { it.isBlank() || it == "application/octet-stream" }
+                    ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(output.extension)
+                    ?: "application/octet-stream"
+                publish(id, partial, output.name, mime, completed)
+                partial.delete()
+            } else change(id) {
+                require(partial.renameTo(output)) { "无法发布下载文件，请检查存储空间" }
+                completed(it)
             }
         }
     }
@@ -140,9 +154,49 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         val temporary = File(folder, "offline.tmp")
         temporary.writeText(playlist.localLines.joinToString("\n", postfix = "\n"))
         check(id)
-        change(id) {
-            require(temporary.renameTo(output)) { "离线清单整理失败" }
+        val completed: (DownloadTask) -> DownloadTask = {
             it.copy(state = TaskState.COMPLETE, output = output.name, downloaded = copied, total = copied, error = "")
+        }
+        if (task.saveToPublic) {
+            require(temporary.renameTo(output)) { "离线清单整理失败" }
+            val archive = File(folder, "public-export.part")
+            try {
+                writeOfflineArchive(folder, output.name, archive) { check(id) }
+                publish(id, archive, safeFileName(task.title, "zip"), "application/zip", completed)
+            } finally {
+                archive.delete()
+            }
+        } else change(id) {
+            require(temporary.renameTo(output)) { "离线清单整理失败" }
+            completed(it)
+        }
+    }
+
+    private fun publish(id: String, source: File, name: String, mime: String, complete: (DownloadTask) -> DownloadTask) {
+        var uri: Uri? = null
+        var committed = false
+        try {
+            check(id)
+            val published = repository.publicDownloads.publish(source, name, mime, { check(id) }) { created ->
+                uri = created
+                var remembered = false
+                change(id) { task -> task.copy(publicUri = created.toString()).also { remembered = true } }
+                if (!remembered) throw Stopped()
+            }
+            var finished = false
+            change(id) { task ->
+                complete(task).copy(publicUri = published.toString()).also { finished = true }
+            }
+            if (!finished) throw Stopped()
+            committed = true
+        } finally {
+            if (!committed) uri?.let { created ->
+                if (runCatching { repository.publicDownloads.delete(created) }.isSuccess) {
+                    repository.update(id) { task ->
+                        if (task.publicUri == created.toString()) task.copy(publicUri = "") else task
+                    }
+                }
+            }
         }
     }
 
@@ -158,6 +212,7 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
     private fun message(error: Exception): String = when {
         error is java.net.SocketTimeoutException -> "网络超时，点击继续重试"
         error is java.net.UnknownHostException -> "网络不可用或无法解析资源域名"
+        error is SecurityException -> "无法访问公共下载目录，请检查存储权限后继续"
         error is java.io.FileNotFoundException || error.message?.contains("ENOSPC") == true -> "无法写入文件，请检查存储空间"
         error is IllegalArgumentException || error is IllegalStateException -> error.message?.take(150) ?: "资源格式不支持"
         error is MediaHttp.HttpFailure -> error.message!!.take(150)

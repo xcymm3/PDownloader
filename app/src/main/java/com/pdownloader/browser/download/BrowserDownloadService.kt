@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.IBinder
 import android.webkit.CookieManager
 import com.pdownloader.browser.BuildConfig
@@ -72,6 +74,11 @@ class BrowserDownloadService : Service() {
                 try {
                     val http = MediaHttp({ CookieManager.getInstance().getCookie(it) }, BuildConfig.DEBUG)
                     DownloadEngine(repository, http) { stopping }.run(id)
+                    if (settings.notifyCompletion) {
+                        repository.get(id)?.takeIf { it.state == TaskState.COMPLETE }?.let { task ->
+                            main.post { notifyCompleted(task) }
+                        }
+                    }
                 } finally {
                     main.post {
                         inFlight.remove(id)
@@ -106,6 +113,15 @@ class BrowserDownloadService : Service() {
         } }
     }
     private fun activeTaskIds() = repository.all().filter { it.state in activeStates }.map { it.id }
+
+    private fun notifyCompleted(task: DownloadTask) {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        val open = PendingIntent.getActivity(this, 2, Intent(this, MainActivity::class.java).putExtra("section", 2), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val notification = Notification.Builder(this, CHANNEL).setContentTitle("下载完成")
+            .setContentText(task.title).setSmallIcon(R.drawable.ic_download_notification)
+            .setContentIntent(open).setAutoCancel(true).build()
+        getSystemService(NotificationManager::class.java).notify(201, notification)
+    }
     private fun notification(text: String, task: DownloadTask? = null): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).putExtra("section", 1), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val pause = PendingIntent.getService(this, 1, Intent(this, BrowserDownloadService::class.java).setAction("pause-all"), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)

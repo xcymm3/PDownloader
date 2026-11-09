@@ -83,36 +83,36 @@ class MediaDownloadTest {
     @Test fun parallelDownloadsHonorLiveLimitChangesAndCompleteWithoutDuplicateWriters() {
         val settings = DownloadSettings(context)
         val previousLimit = settings.parallelDownloads
-        val gates = List(3) { CountDownLatch(1) }
+        val gates = List(9) { CountDownLatch(1) }
         server.beforeSlowBody = { path ->
             val index = path.substringAfter("parallel=").toInt()
             check(gates[index].await(15, TimeUnit.SECONDS))
         }
         try {
-            settings.parallelDownloads = 2
+            settings.parallelDownloads = 8
             val tasks = gates.indices.map { enqueue("/slow.mp4?parallel=$it") }
             fun state(index: Int) = repository.get(tasks[index].id)?.state
             ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
                 scenario.onActivity { it.startForegroundService(Intent(it, BrowserDownloadService::class.java)) }
-                await { state(0) == TaskState.DOWNLOADING && state(1) == TaskState.DOWNLOADING }
-                assertEquals(TaskState.QUEUED, state(2))
+                await { (0..7).all { state(it) == TaskState.DOWNLOADING } }
+                assertEquals(TaskState.QUEUED, state(8))
 
                 scenario.onActivity { settings.parallelDownloads = 1 }
-                gates[1].countDown()
-                await { state(1) == TaskState.COMPLETE }
+                (1..7).forEach { gates[it].countDown() }
+                await { (1..7).all { state(it) == TaskState.COMPLETE } }
                 instrumentation.waitForIdleSync()
                 assertEquals(TaskState.DOWNLOADING, state(0))
-                assertEquals(TaskState.QUEUED, state(2))
+                assertEquals(TaskState.QUEUED, state(8))
 
                 scenario.onActivity { settings.parallelDownloads = 2 }
-                await { state(2) == TaskState.DOWNLOADING }
+                await { state(8) == TaskState.DOWNLOADING }
                 gates.forEach { it.countDown() }
                 await { tasks.indices.all { state(it) == TaskState.COMPLETE } }
                 tasks.forEach { task ->
                     val output = repository.get(task.id)!!.output
                     assertArrayEquals(sample(), File(repository.folder(task.id), output).readBytes())
                 }
-                assertEquals(3, server.requests.count { it.first == "/slow.mp4" })
+                assertEquals(9, server.requests.count { it.first == "/slow.mp4" })
             }
         } finally {
             gates.forEach { it.countDown() }
@@ -193,6 +193,55 @@ class MediaDownloadTest {
         assertFalse(local.readText().contains("http"))
         assertOfflineReady(local)
     }
+    @androidx.test.filters.SdkSuppress(minSdkVersion = 29)
+    @Test fun publicMediaIsIndexedPlayableAndRemovedWithItsFile() {
+        val resolver = context.contentResolver
+        fun download(path: String, kind: MediaKind): DownloadTask {
+            val task = repository.enqueue("公共下载测试", MediaVariant(server.base + path, kind),
+                RequestContext(server.base, "FixtureAgent"), saveToPublic = true).first
+            ids.add(task.id)
+            engine.run(task.id)
+            val completed = repository.get(task.id)!!
+            assertEquals(completed.error, TaskState.COMPLETE, completed.state)
+            val uri = Uri.parse(completed.publicUri)
+            assertEquals("content", uri.scheme)
+            val columns = arrayOf(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.provider.MediaStore.MediaColumns.IS_PENDING)
+            resolver.query(uri, columns, null, null, null)!!.use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Download/PDownloader/", cursor.getString(0))
+                assertEquals(0, cursor.getInt(1))
+            }
+            return completed
+        }
+
+        val video = download("/sample.mp4", MediaKind.VIDEO)
+        val videoUri = repository.playbackUri(video)
+        assertArrayEquals(sample(), resolver.openInputStream(videoUri)!!.use { it.readBytes() })
+        assertFalse(File(repository.folder(video.id), video.output).exists())
+        assertOfflineReady(videoUri)
+        repository.forget(video.id, false)
+        assertEquals(video.publicUri, repository.get(video.id)?.publicUri)
+        repository.forget(video.id, true)
+        assertFalse(runCatching { resolver.openInputStream(videoUri)?.use { true } == true }.getOrDefault(false))
+
+        val image = download("/picture.png", MediaKind.IMAGE)
+        resolver.openInputStream(repository.playbackUri(image))!!.use { input ->
+            val bitmap = android.graphics.BitmapFactory.decodeStream(input)
+            assertNotNull(bitmap)
+            assertEquals(1, bitmap.width)
+            bitmap.recycle()
+        }
+
+        val hls = download("/media.m3u8", MediaKind.HLS)
+        val zipUri = Uri.parse(hls.publicUri)
+        assertEquals("application/zip", resolver.getType(zipUri))
+        java.util.zip.ZipInputStream(resolver.openInputStream(zipUri)!!).use { zip ->
+            assertEquals("offline.m3u8", zip.nextEntry.name)
+            assertFalse(zip.readBytes().decodeToString().contains("http"))
+            assertTrue(zip.nextEntry.name.startsWith("part-"))
+        }
+        assertOfflineReady(repository.playbackUri(hls))
+    }
     @Test fun fmp4ByteRangesDownloadAndPrepareOffline() {
         val task = enqueue("/single.m3u8", MediaKind.HLS)
         engine.run(task.id)
@@ -201,7 +250,9 @@ class MediaDownloadTest {
         assertTrue(server.requests.filter { it.first == "/single.mp4" }.all { it.second.containsKey("range") })
         assertOfflineReady(File(repository.folder(task.id), completed.output))
     }
-    private fun assertOfflineReady(local: File) {
+    private fun assertOfflineReady(local: File) = assertOfflineReady(Uri.fromFile(local))
+
+    private fun assertOfflineReady(local: Uri) {
         val latch = CountDownLatch(1)
         var player: ExoPlayer? = null
         var failure: PlaybackException? = null
@@ -212,7 +263,7 @@ class MediaDownloadTest {
                     override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_READY) { duration = p.duration; latch.countDown() } }
                     override fun onPlayerError(error: PlaybackException) { failure = error; latch.countDown() }
                 })
-                p.setMediaItem(MediaItem.fromUri(Uri.fromFile(local)))
+                p.setMediaItem(MediaItem.fromUri(local))
                 p.prepare()
             }
         }

@@ -57,6 +57,7 @@ class DownloadsView(
     private val heading = activity.label(if (completedPage) "已下载" else "下载中", 25f)
     private val bulk = activity.row()
     private val downloadSettings = DownloadSettings(activity)
+    private val parallelSetting = if (completedPage) null else activity.action(parallelDownloadLabel()) {}
     private val filters = activity.row()
     private val empty = activity.label("暂无下载任务", 16f, true).apply { gravity = Gravity.CENTER }
     private val list = ListView(activity)
@@ -190,9 +191,8 @@ class DownloadsView(
             })
         }
         addView(search, LayoutParams(-1, activity.dp(48)).apply { setMargins(activity.dp(16), activity.dp(8), activity.dp(16), activity.dp(8)) })
-        if (!completedPage) {
-            val setting = activity.action(parallelDownloadLabel()) {}
-            setting.setOnClickListener { showParallelDownloadOptions(setting) }
+        parallelSetting?.let { setting ->
+            setting.setOnClickListener { activity.chooseDownloadLimit(downloadSettings) { refreshDownloadLimit() } }
             bulk.addView(setting, LayoutParams(0, activity.dp(48), 1f).apply { marginStart = activity.dp(16) })
         }
         bulk.addView(BrowserIcon(activity, "pause", "暂停全部下载") {
@@ -242,17 +242,11 @@ class DownloadsView(
     fun hide() { visiblePage = false }
     private fun parallelDownloadLabel() = activity.getString(R.string.parallel_download_limit, downloadSettings.parallelDownloads)
 
-    private fun showParallelDownloadOptions(setting: TextView) {
-        val options = (1..DownloadSettings.MAX_PARALLEL_DOWNLOADS).map { activity.getString(R.string.parallel_download_limit, it) }
-        AlertDialog.Builder(activity)
-            .setTitle(R.string.parallel_download_title)
-            .setSingleChoiceItems(options.toTypedArray(), downloadSettings.parallelDownloads - 1) { dialog, index ->
-                downloadSettings.parallelDownloads = index + 1
-                setting.text = parallelDownloadLabel()
-                dialog.dismiss()
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+    internal fun refreshDownloadLimit() {
+        parallelSetting?.let { setting ->
+            val label = parallelDownloadLabel()
+            if (setting.text != label) setting.text = label
+        }
     }
 
     private fun updateTasks(from: Set<TaskState>, to: TaskState) {
@@ -322,20 +316,27 @@ class DownloadsView(
                         }.show()
                     }
                     "取消并清理" -> AlertDialog.Builder(activity).setTitle("取消并清理临时文件？").setNegativeButton("返回", null).setPositiveButton("取消下载") { _, _ ->
-                        io.execute {
-                            repository.update(task.id) { it.copy(state = TaskState.CANCELLED, error = "") }
-                            repository.folder(task.id).deleteRecursively()
-                        }
+                        deleteFromQueue { repository.cancel(task.id) }
                     }.show()
                     "删除", "删除记录" -> {
                         if (task.state in activeStates) android.widget.Toast.makeText(activity, "请先暂停任务再删除", android.widget.Toast.LENGTH_SHORT).show()
                         else AlertDialog.Builder(activity).setTitle("删除下载记录？").setMessage(if (task.state == TaskState.COMPLETE) "仅删除记录会在“已下载”保留文件入口；同时删文件会清理本地媒体。" else "删除未完成任务时会清理临时文件。")
-                            .setNegativeButton("取消", null).setNeutralButton("仅删记录") { _, _ -> io.execute { repository.forget(task.id, false) } }
-                            .setPositiveButton("同时删文件") { _, _ -> io.execute { repository.forget(task.id, true) } }.show()
+                            .setNegativeButton("取消", null).setNeutralButton("仅删记录") { _, _ -> deleteFromQueue { repository.forget(task.id, false) } }
+                            .setPositiveButton("同时删文件") { _, _ -> deleteFromQueue { repository.forget(task.id, true) } }.show()
                     }
                 }
                 true
             }
         }.show()
+    }
+
+    private fun deleteFromQueue(delete: () -> Unit) {
+        io.execute {
+            runCatching(delete).onFailure {
+                main.post {
+                    if (!closed) android.widget.Toast.makeText(activity, "无法删除，请检查文件访问权限或任务状态", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 }
