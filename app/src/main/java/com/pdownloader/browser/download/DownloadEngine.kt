@@ -264,7 +264,7 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         else -> DownloadFailure.OTHER
     }
     private fun message(error: Exception): String = when {
-        is SourceUnavailable -> error.message.orEmpty()
+        error is SourceUnavailable -> error.message.orEmpty()
         error is java.net.SocketTimeoutException -> "网络超时，点击继续重试"
         error is java.net.UnknownHostException -> "网络不可用或无法解析资源域名"
         error is SecurityException -> "无法访问公共下载目录，请检查存储权限后继续"
