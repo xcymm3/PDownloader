@@ -39,9 +39,12 @@ import android.widget.ImageView
 import androidx.core.content.FileProvider
 import com.pdownloader.browser.media.*
 import com.pdownloader.browser.download.*
+import com.pdownloader.browser.update.AppUpdateController
+import com.pdownloader.browser.update.PROJECT_URL
 import java.io.File
 
 class MainActivity : ThemedActivity() {
+    private val updates by lazy { AppUpdateController(this) }
     private data class Tab(
         val id: String = UUID.randomUUID().toString(),
         var url: String = "", var title: String = "新标签页",
@@ -509,7 +512,7 @@ class MainActivity : ThemedActivity() {
         }, "分享网页"))
     }
     private fun showAbout() {
-        val project = "https://github.com/xcymm3/PDownloader"
+        val project = PROJECT_URL
         AlertDialog.Builder(this).setTitle("关于 PDownloader")
             .setMessage("版本 ${BuildConfig.VERSION_NAME}\n作者 xcymm3\n\n$project")
             .setNegativeButton("关闭", null)
@@ -718,6 +721,7 @@ class MainActivity : ThemedActivity() {
         if (intent.hasExtra("section")) selectSection(intent.getIntExtra("section", 0).coerceIn(0, 2))
     }
     override fun onPause() {
+        updates.pause()
         probe.pause()
         exitFullscreen(); tabs.forEach { it.web?.onPause() }; persistSession(); super.onPause()
     }
@@ -725,6 +729,7 @@ class MainActivity : ThemedActivity() {
         super.onResume()
         downloads.refreshDownloadLimit()
         if (tabs.isNotEmpty() && section == 0 && !historyOpen && !bookmarksOpen && !tabsOpen) { current.web?.onResume(); probe.resume() }
+        updates.resume(automatic = true)
     }
     override fun onDestroy() {
         browserMenu?.dismiss(); bookmarks.close(); history.close(); completedDownloads.close(); imageGallery?.dismiss(); mediaSheet?.dismiss(); downloads.close(); mediaImages.close()

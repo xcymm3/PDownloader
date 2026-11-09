@@ -12,6 +12,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.pdownloader.browser.download.DownloadSettings
+import com.pdownloader.browser.update.AppUpdateController
 
 private enum class BrowserTheme(val label: String, val night: Int?) {
     SYSTEM("跟随系统", null), LIGHT("浅色", Configuration.UI_MODE_NIGHT_NO), DARK("深色", Configuration.UI_MODE_NIGHT_YES)
@@ -56,6 +57,18 @@ abstract class ThemedActivity : Activity() {
 }
 
 class SettingsActivity : ThemedActivity() {
+    private val updates by lazy { AppUpdateController(this) }
+
+    override fun onResume() {
+        super.onResume()
+        updates.resume(automatic = false)
+    }
+
+    override fun onPause() {
+        updates.pause()
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val settings = DownloadSettings(this)
@@ -103,6 +116,8 @@ class SettingsActivity : ThemedActivity() {
         }
         toggle("下载完成通知", settings.notifyCompletion) { settings.notifyCompletion = it }
         toggle("按流量计费网络下添加任务前提醒", settings.warnOnMetered) { settings.warnOnMetered = it }
+        section("版本更新")
+        option("检查更新", "当前版本 ${BuildConfig.VERSION_NAME}", updates::check)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val light = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK != Configuration.UI_MODE_NIGHT_YES
