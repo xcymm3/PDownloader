@@ -35,7 +35,7 @@ class ProbeSession(val tabId: String, val pageUrl: String, val userAgent: String
     val unsupported: Boolean get() = runCatching { URI(pageUrl).host.lowercase().let { it == "youtube.com" || it.endsWith(".youtube.com") || it == "youtu.be" } }.getOrDefault(false)
 }
 
-internal data class ProbeRequest(val referer: String, val authorization: String, val shared: Boolean)
+internal data class ProbeRequest(val referer: String, val authorization: String, val shared: Boolean, val acceptsMedia: Boolean)
 
 /** All mutable session/UI state belongs to main. Worker replies retain the exact navigation object. */
 class MediaProbe(private val context: Context, private val changed: () -> Unit) {
@@ -96,8 +96,10 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
         val url = request.url.toString()
         if (!webUrl(url) || ignoredResource(url)) return
         val headers = request.requestHeaders
+        val accept = headers.entries.firstOrNull { it.key.equals("Accept", true) }?.value.orEmpty()
         val observation = ProbeRequest(headers.entries.firstOrNull { it.key.equals("Referer", true) }?.value.orEmpty(),
-            headers.entries.firstOrNull { it.key.equals("Authorization", true) }?.value.orEmpty(), shared)
+            headers.entries.firstOrNull { it.key.equals("Authorization", true) }?.value.orEmpty(), shared,
+            accept.contains("video/", true) || accept.contains("mpegurl", true))
         main.post {
             if (!session.alive || closed) return@post
             if (url !in session.observed && session.observed.size >= 120) session.observed.remove(session.observed.keys.first())
@@ -110,25 +112,31 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
         }
     }
 
-    /** An origin-only or shared-worker observation needs corroboration from this navigation's DOM or performance entries. */
+    /** Weak observations need corroboration from this navigation's document, a known iframe, or its performance entries. */
     private fun attribute(session: ProbeSession, url: String, document: String? = null): RequestContext? {
         val request = session.observed[url]
         val ref = request?.referer.orEmpty().substringBefore('#')
         val documents = sequenceOf(session.pageUrl).plus(session.frames.asSequence())
         val exact = ref.isNotEmpty() && documents.any { it.substringBefore('#') == ref }
         val originOnly = webUrl(ref) && URI(ref).let { it.rawPath.orEmpty() in setOf("", "/") && it.rawQuery == null }
+        val refOrigin = if (originOnly) origin(ref) else ""
+        val matchedFrame = if (originOnly && request?.shared == false && refOrigin != origin(session.pageUrl) &&
+            (origin(url) == refOrigin || request.acceptsMedia)) {
+            session.frames.firstOrNull { origin(it) == refOrigin }
+        } else null
         val knownDocument = document?.takeIf { webUrl(it) &&
             (it.substringBefore('#') == session.pageUrl.substringBefore('#') || session.frames.any { frame -> frame.substringBefore('#') == it.substringBefore('#') }) }
         val source = when {
             knownDocument != null -> knownDocument
             exact && !originOnly && request?.shared == false -> ref
+            matchedFrame != null -> matchedFrame
             else -> return null
         }
         val compatible = request != null && (ref.isEmpty() || ref == source.substringBefore('#') || originOnly && origin(ref) == origin(source))
         val ctx = if (compatible && request != null) RequestContext(session.pageUrl, session.userAgent, ref.ifEmpty { source }, origin(url), request.authorization)
             else RequestContext(session.pageUrl, session.userAgent, source)
         if (session.requestContexts.size < 120 || url in session.requestContexts) session.requestContexts[url] = ctx
-        if (knownDocument == null) candidate(session, url, ctx)
+        if (knownDocument == null) candidate(session, url, ctx, allowOpaque = matchedFrame != null || request?.acceptsMedia == true)
         return ctx
     }
 

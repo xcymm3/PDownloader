@@ -407,6 +407,40 @@ class MediaDownloadTest {
         } finally { instrumentation.runOnMainSync { probe?.close(); web?.destroy() } }
     }
 
+    @Test fun extensionlessPlaylistInCrossOriginIframeKeepsItsSource() {
+        val page = server.base + "/nested-opaque"
+        var probe: MediaProbe? = null
+        var web: WebView? = null
+        lateinit var session: ProbeSession
+        instrumentation.runOnMainSync {
+            probe = MediaProbe(context) {}
+            web = WebView(context).apply {
+                settings.javaScriptEnabled = true
+                session = probe!!.begin("frame-tab", page, settings.userAgentString, "Nested")
+                webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
+                        probe!!.observe(session, request)
+                        return null
+                    }
+                }
+                loadUrl(page)
+            }
+            probe!!.attach(session, web)
+            probe!!.resume()
+        }
+        try {
+            await(25000) {
+                var found = false
+                instrumentation.runOnMainSync {
+                    val candidate = session.groups.values.singleOrNull()?.variants?.singleOrNull()
+                    found = candidate?.kind == MediaKind.HLS && candidate.requestContext?.pageUrl == page &&
+                        candidate.requestContext?.referer?.startsWith("http://localhost:") == true
+                }
+                found
+            }
+        } finally { instrumentation.runOnMainSync { probe?.close(); web?.destroy() } }
+    }
+
     private fun await(timeout: Long = 15000, condition: () -> Boolean) {
         val until = System.currentTimeMillis() + timeout
         while (System.currentTimeMillis() < until) { if (condition()) return; Thread.sleep(100) }

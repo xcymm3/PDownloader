@@ -42,6 +42,10 @@ class FixtureServer(private val context: Context) : Closeable {
         val body = when {
             path == "/" -> { mime = "text/html; charset=utf-8"; page().toByteArray() }
             path == "/frame" -> { mime = "text/html"; "<video preload=\"none\" controls src=\"$base/sample.mp4?frame=1\"></video>".toByteArray() }
+            path == "/nested-opaque" -> {
+                mime = "text/html"
+                "<iframe src=\"${base.replace("127.0.0.1", "localhost")}/opaque-page?auto=1\"></iframe>".toByteArray()
+            }
             path == "/opaque-page" -> {
                 mime = "text/html"
                 extra += "Referrer-Policy: origin\r\n"
@@ -52,6 +56,7 @@ class FixtureServer(private val context: Context) : Closeable {
                   player.src = URL.createObjectURL(new Blob());
                   fetch('/r/7f2').then(r => r.text());
                 };
+                if (location.search.includes('auto=1')) setTimeout(startFixture, 300);
                 </script>
                 """.trimIndent().toByteArray()
             }
