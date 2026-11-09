@@ -10,7 +10,8 @@ import java.net.URL
 
 class MediaHttp(
     private val cookieForUrl: (String) -> String? = { null },
-    private val allowLocalTests: Boolean = false
+    private val allowLocalTests: Boolean = false,
+    private val timeoutMs: Int? = null
 ) {
     class HttpFailure(val code: Int) : IOException(when (code) {
         401 -> "需要登录，请打开原网页登录后重试"
@@ -33,7 +34,7 @@ class MediaHttp(
             validateTarget(target)
             val connection = URL(target).openConnection() as HttpURLConnection
             connection.instanceFollowRedirects = false
-            connection.connectTimeout = 15000; connection.readTimeout = 20000
+            connection.connectTimeout = timeoutMs ?: 15000; connection.readTimeout = timeoutMs ?: 20000
             connection.requestMethod = method
             connection.setRequestProperty("User-Agent", clean(context.userAgent))
             connection.setRequestProperty("Accept-Encoding", "identity")

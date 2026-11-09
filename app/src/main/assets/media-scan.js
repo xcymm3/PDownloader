@@ -8,13 +8,29 @@
     if (depth > 2) return;
     const doc = root.ownerDocument || root;
     const base = doc.baseURI || location.href;
-    for (const el of Array.from(root.querySelectorAll('video')).slice(0, 40)) {
+    const players = Array.from(root.querySelectorAll('video')).slice(0, 40);
+    const videoKey = el => doc.URL + '#video-' + id(el);
+    for (const el of players) {
       const variants = [];
       const add = (src, quality, mime) => { const url = absolute(src, base); if (url && (url !== doc.URL || (doc.contentType || '').startsWith('video/')) && !variants.some(v => v.url === url)) variants.push({ url, quality: quality || '', mime: mime || '' }); };
       add(el.currentSrc || el.src, el.getAttribute('label'), el.getAttribute('type'));
       for (const source of el.querySelectorAll('source')) if (!source.type || source.type.startsWith('video/') || /mpegurl/i.test(source.type)) add(source.src, source.getAttribute('label') || source.getAttribute('size') || source.title, source.type);
-      if (variants.length) videos.push({ id: base + '#video-' + id(el), title: el.title || doc.title, thumbnail: absolute(el.poster, base), duration: Number.isFinite(el.duration) ? Math.round(el.duration * 1000) : -1, page: base, variants });
+      if (variants.length) videos.push({ id: videoKey(el), title: el.title || doc.title, thumbnail: absolute(el.poster, base), duration: Number.isFinite(el.duration) ? Math.round(el.duration * 1000) : -1, page: doc.URL, variants });
     }
+    if (root === doc) try {
+      const blob = players.length === 1 && /^blob:/i.test(players[0].currentSrc || players[0].src);
+      let opaque = 0;
+      for (const item of doc.defaultView.performance.getEntriesByType('resource').slice(-120).reverse()) {
+        const media = item.initiatorType === 'video' || /\.(m3u8|mp4|webm|mov)([?#]|$)/i.test(item.name);
+        const fetch = blob && /^(fetch|xmlhttprequest)$/.test(item.initiatorType) && opaque < 12;
+        if (!media && !fetch) continue;
+        const url = absolute(item.name, base);
+        if (url && requests.length < 120) {
+          requests.push({ url, page: doc.URL, video: players.length === 1 ? videoKey(players[0]) : '' });
+          if (!media) opaque++;
+        }
+      }
+    } catch (_) {}
     for (const el of Array.from(root.querySelectorAll('img')).slice(0, 200)) {
       const url = absolute(el.currentSrc || el.src || el.getAttribute('data-src'), base);
       if (url) images.push({ url, title: el.alt || doc.title, width: el.naturalWidth || 0, height: el.naturalHeight || 0, page: base });
@@ -26,6 +42,5 @@
     for (const el of Array.from(root.querySelectorAll('*')).slice(0, 1200)) if (el.shadowRoot) visit(el.shadowRoot, depth + 1);
   };
   visit(document, 0);
-  try { for (const item of performance.getEntriesByType('resource').slice(-200)) if (/\.(m3u8|mp4|webm|mov)([?#]|$)/i.test(item.name)) requests.push(item.name); } catch (_) {}
   return JSON.stringify({ url: location.href, title: document.title, videos, images, frames, requests });
 })();

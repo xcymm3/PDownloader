@@ -334,6 +334,49 @@ class MediaDownloadTest {
             }
         } finally { instrumentation.runOnMainSync { probe?.close(); web?.destroy() } }
     }
+    @Test fun extensionlessPlaylistUsesDocumentEvidenceAndDoesNotLeakAcrossNavigation() {
+        val page = server.base + "/opaque-page"
+        var probe: MediaProbe? = null
+        var web: WebView? = null
+        lateinit var session: ProbeSession
+        instrumentation.runOnMainSync {
+            probe = MediaProbe(context) {}
+            web = WebView(context).apply {
+                settings.javaScriptEnabled = true
+                session = probe!!.begin("opaque-tab", page, settings.userAgentString, "Opaque")
+                webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
+                        probe!!.observe(session, request)
+                        return null
+                    }
+                    override fun onPageFinished(view: WebView, url: String) {
+                        if (url == page) view.evaluateJavascript("startFixture(); startFixture()", null)
+                    }
+                }
+                loadUrl(page)
+            }
+            // The network request reaches the observer before the first DOM scan.
+        }
+        try {
+            await { server.requests.any { it.first == "/r/7f2" } }
+            instrumentation.runOnMainSync { probe!!.attach(session, web); probe!!.resume() }
+            await {
+                var found = false
+                instrumentation.runOnMainSync {
+                    found = session.groups.values.singleOrNull()?.variants?.singleOrNull()?.kind == MediaKind.HLS
+                }
+                found
+            }
+            assertTrue(server.requests.any { (path, headers) -> path == "/r/7f2" && headers["range"] == "bytes=0-2047" })
+            instrumentation.runOnMainSync {
+                probe!!.retire(session)
+                val next = probe!!.begin("opaque-tab", server.base + "/next", session.userAgent, "Next")
+                probe!!.attach(next, web)
+                assertTrue(next.groups.isEmpty())
+            }
+        } finally { instrumentation.runOnMainSync { probe?.close(); web?.destroy() } }
+    }
+
     private fun await(timeout: Long = 15000, condition: () -> Boolean) {
         val until = System.currentTimeMillis() + timeout
         while (System.currentTimeMillis() < until) { if (condition()) return; Thread.sleep(100) }

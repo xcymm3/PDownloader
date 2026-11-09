@@ -20,6 +20,7 @@ class ProbeSession(val tabId: String, val pageUrl: String, val userAgent: String
     val groups = linkedMapOf<String, MediaGroup>()
     val seenRequests = mutableSetOf<String>()
     val deferred = linkedMapOf<String, Pair<RequestContext, Boolean>>()
+    internal val observed = linkedMapOf<String, ProbeRequest>()
     val relationships = mutableMapOf<String, String>()
     val requestContexts = mutableMapOf<String, RequestContext>()
     val hlsHints = mutableSetOf<String>()
@@ -27,28 +28,37 @@ class ProbeSession(val tabId: String, val pageUrl: String, val userAgent: String
     val queue = ArrayDeque<Pair<String, Int>>()
     @Volatile var alive = true
     var pending = 0
+    var opaqueChecks = 0
     var frameCount = 0
     var message = "尚未发现资源，可先播放视频"
     var startedAt = System.currentTimeMillis()
     val unsupported: Boolean get() = runCatching { URI(pageUrl).host.lowercase().let { it == "youtube.com" || it.endsWith(".youtube.com") || it == "youtu.be" } }.getOrDefault(false)
 }
 
+internal data class ProbeRequest(val referer: String, val authorization: String, val shared: Boolean)
+
 /** All mutable session/UI state belongs to main. Worker replies retain the exact navigation object. */
 class MediaProbe(private val context: Context, private val changed: () -> Unit) {
     private val main = Handler(Looper.getMainLooper())
     private val workers = Executors.newFixedThreadPool(2)
-    private val http = MediaHttp({ CookieManager.getInstance().getCookie(it) }, BuildConfig.DEBUG)
+    private val http = MediaHttp({ CookieManager.getInstance().getCookie(it) }, BuildConfig.DEBUG, timeoutMs = 6000)
     private val script = context.assets.open("media-scan.js").bufferedReader().use { it.readText() }
     @Volatile private var active: Pair<ProbeSession, WebView>? = null
     private var helper: WebView? = null
     private var helperSession: ProbeSession? = null
+    private var helperDepth = 0
     private var helperTimer: Runnable? = null
     @Volatile private var closed = false
     private var polling = false
     private val poll = object : Runnable {
         override fun run() {
             if (closed) return
-            active?.let { (session, web) -> if (session.alive) scan(session, web, 0) }
+            active?.let { (session, web) ->
+                if (session.alive) {
+                    scan(session, web, 0)
+                    helper?.takeIf { helperSession === session }?.let { scan(session, it, helperDepth) }
+                }
+            }
             if (polling) main.postDelayed(this, 1200)
         }
     }
@@ -56,9 +66,7 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
         android.webkit.ServiceWorkerController.getInstance().setServiceWorkerClient(object : android.webkit.ServiceWorkerClient() {
             override fun shouldInterceptRequest(request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 val session = active?.first ?: return null
-                val ref = request.requestHeaders.entries.firstOrNull { it.key.equals("Referer", true) }?.value
-                // A shared worker without an attributable source is deliberately ignored.
-                if (ref != null) observe(session, request) // Session/frame attribution is checked on main.
+                observe(session, request, shared = true)
                 return null
             }
         })
@@ -83,31 +91,57 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
     }
     fun close() { closed = true; pause(); workers.shutdownNow(); android.webkit.ServiceWorkerController.getInstance().setServiceWorkerClient(null) }
 
-    fun observe(session: ProbeSession?, request: WebResourceRequest) {
-        if (request.method != "GET" || request.isForMainFrame) return
+    fun observe(session: ProbeSession?, request: WebResourceRequest, shared: Boolean = false) {
+        if (session?.alive != true || request.method != "GET" || request.isForMainFrame) return
         val url = request.url.toString()
-        if (!webUrl(url)) return
-        val headers = request.requestHeaders.toMap()
+        if (!webUrl(url) || ignoredResource(url)) return
+        val headers = request.requestHeaders
+        val observation = ProbeRequest(headers.entries.firstOrNull { it.key.equals("Referer", true) }?.value.orEmpty(),
+            headers.entries.firstOrNull { it.key.equals("Authorization", true) }?.value.orEmpty(), shared)
         main.post {
-            if (session?.alive == true) {
-                val ref = headers.entries.firstOrNull { it.key.equals("Referer", true) }?.value
-                if (ref != null && ref.substringBefore('#') != session.pageUrl.substringBefore('#') && session.frames.none { it.substringBefore('#') == ref.substringBefore('#') }) return@post
-                val ctx = RequestContext(session.pageUrl, session.userAgent, ref ?: session.pageUrl, origin(url),
-                    headers.entries.firstOrNull { it.key.equals("Authorization", true) }?.value ?: "")
-                if (session.requestContexts.size < 60 && Regex("(m3u8|mp4|webm|video|play|stream|download)", RegexOption.IGNORE_CASE).containsMatchIn(URI(url).path.orEmpty())) session.requestContexts[url] = ctx
-                // Without Referer, wait for this document's DOM/performance entries to prove ownership.
-                if (ref != null || url in session.relationships) candidate(session, url, ctx, false)
+            if (!session.alive || closed) return@post
+            if (url !in session.observed && session.observed.size >= 120) session.observed.remove(session.observed.keys.first())
+            val previous = session.observed[url]
+            if (previous == null || previous.shared && !observation.shared ||
+                previous.authorization.isEmpty() && observation.authorization.isNotEmpty() && previous.shared == observation.shared) {
+                session.observed[url] = observation
             }
+            attribute(session, url)
         }
     }
+
+    /** An origin-only or shared-worker observation needs corroboration from this navigation's DOM or performance entries. */
+    private fun attribute(session: ProbeSession, url: String, document: String? = null): RequestContext? {
+        val request = session.observed[url]
+        val ref = request?.referer.orEmpty().substringBefore('#')
+        val documents = sequenceOf(session.pageUrl).plus(session.frames.asSequence())
+        val exact = ref.isNotEmpty() && documents.any { it.substringBefore('#') == ref }
+        val originOnly = webUrl(ref) && URI(ref).let { it.rawPath.orEmpty() in setOf("", "/") && it.rawQuery == null }
+        val knownDocument = document?.takeIf { webUrl(it) &&
+            (it.substringBefore('#') == session.pageUrl.substringBefore('#') || session.frames.any { frame -> frame.substringBefore('#') == it.substringBefore('#') }) }
+        val source = when {
+            knownDocument != null -> knownDocument
+            exact && !originOnly && request?.shared == false -> ref
+            else -> return null
+        }
+        val compatible = request != null && (ref.isEmpty() || ref == source.substringBefore('#') || originOnly && origin(ref) == origin(source))
+        val ctx = if (compatible && request != null) RequestContext(session.pageUrl, session.userAgent, ref.ifEmpty { source }, origin(url), request.authorization)
+            else RequestContext(session.pageUrl, session.userAgent, source)
+        if (session.requestContexts.size < 120 || url in session.requestContexts) session.requestContexts[url] = ctx
+        if (knownDocument == null) candidate(session, url, ctx)
+        return ctx
+    }
+
     fun observeUrl(session: ProbeSession?, url: String) {
-        if (session?.alive == true && url in session.relationships) candidate(session, url, session.requestContexts[url] ?: RequestContext(session.pageUrl, session.userAgent), true)
+        if (session?.alive == true && url in session.relationships) {
+            candidate(session, url, session.requestContexts[url] ?: RequestContext(session.pageUrl, session.userAgent), allowOpaque = true)
+        }
     }
     fun direct(session: ProbeSession, url: String, mime: String, size: Long, kind: MediaKind = downloadKind(url, mime)) {
         if (!session.alive || !webUrl(url) || session.unsupported || kind == MediaKind.OTHER) return
         if (kind == MediaKind.HLS) {
             if (session.hlsHints.size < 60) session.hlsHints.add(url)
-            candidate(session, url, RequestContext(session.pageUrl, session.userAgent), false)
+            candidate(session, url, RequestContext(session.pageUrl, session.userAgent))
         }
         else merge(session, "direct:$url", session.title, listOf(MediaVariant(url, kind, size = size, mime = mime)), RequestContext(session.pageUrl, session.userAgent))
     }
@@ -115,30 +149,40 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
     private fun scan(session: ProbeSession, web: WebView, depth: Int) {
         if (!session.alive || session.unsupported || closed) return
         web.evaluateJavascript(script) { raw ->
-            if (!session.alive || closed || raw.length > 512 * 1024) return@evaluateJavascript
+            if (!session.alive || closed || depth > 0 && helper !== web || raw.length > 512 * 1024) return@evaluateJavascript
             runCatching {
                 val text = JSONTokener(raw).nextValue() as? String ?: return@runCatching
                 val root = JSONObject(text)
                 val page = root.optString("url")
-                if (depth == 0 && page != session.pageUrl) {
+                if (depth == 0 && page.substringBefore('#') != session.pageUrl.substringBefore('#')) {
                     // SPA identity is handled by the owner as a fresh navigation, never merged here.
                     return@runCatching
                 }
+                root.optJSONArray("frames")?.let { frames -> repeat(minOf(frames.length(), 8)) {
+                    val url = frames.optString(it)
+                    if (depth < 2 && webUrl(url) && url != session.pageUrl && session.frames.size < 12 && session.frames.add(url)) session.queue.add(url to (depth + 1))
+                } }
                 val ctx = RequestContext(session.pageUrl, session.userAgent, if (webUrl(page)) page else session.pageUrl)
                 root.optJSONArray("videos")?.let { videos -> repeat(minOf(videos.length(), 40)) { index ->
                     val video = videos.optJSONObject(index) ?: return@repeat
                     val variants = video.optJSONArray("variants") ?: return@repeat
                     val values = mutableListOf<MediaVariant>()
+                    val videoKey = video.optString("id")
+                    val videoPage = video.optString("page", page)
                     repeat(minOf(variants.length(), 12)) { v ->
                         val variant = variants.optJSONObject(v) ?: return@repeat
                         val url = variant.optString("url")
                         if (webUrl(url)) {
-                            session.relationships[url] = video.optString("id")
-                            if (URI(url).path.endsWith(".m3u8", true) || variant.optString("mime").contains("mpegurl")) {
+                            if (session.relationships.size < 240) session.relationships[url] = videoKey
+                            val requestContext = attribute(session, url, videoPage) ?: ctx
+                            val mime = variant.optString("mime")
+                            if (URI(url).path.endsWith(".m3u8", true) || mime.contains("mpegurl", true)) {
                                 if (session.hlsHints.size < 60) session.hlsHints.add(url)
-                                candidate(session, url, ctx, false)
+                                candidate(session, url, requestContext)
                             }
-                            else values.add(MediaVariant(url, MediaKind.VIDEO, variant.optString("quality").ifBlank { "原始版本" }, mime = variant.optString("mime"), requestContext = session.requestContexts[url]))
+                            else if (mime.startsWith("video/") || VIDEO_SUFFIX.containsMatchIn(URI(url).path.orEmpty())) {
+                                values.add(MediaVariant(url, MediaKind.VIDEO, variant.optString("quality").ifBlank { "原始版本" }, mime = mime, requestContext = requestContext))
+                            } else candidate(session, url, requestContext, allowOpaque = true)
                         }
                     }
                     if (values.isNotEmpty()) merge(session, video.optString("id"), video.optString("title"), values, ctx, video.optString("thumbnail"), video.optLong("duration", -1))
@@ -148,11 +192,16 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
                     val url = image.optString("url")
                     if (webUrl(url)) merge(session, "image:$url", image.optString("title"), listOf(MediaVariant(url, MediaKind.IMAGE, quality = if (image.optInt("width") > 0) "${image.optInt("width")} × ${image.optInt("height")}" else "图片")), ctx, url)
                 } }
-                root.optJSONArray("requests")?.let { requests -> repeat(minOf(requests.length(), 200)) { val url = requests.optString(it); candidate(session, url, session.requestContexts[url] ?: ctx, true) } }
-                root.optJSONArray("frames")?.let { frames -> repeat(minOf(frames.length(), 8)) {
-                    val url = frames.optString(it)
-                    if (depth < 2 && webUrl(url) && url != session.pageUrl && session.frames.size < 12 && session.frames.add(url)) session.queue.add(url to (depth + 1))
+                root.optJSONArray("requests")?.let { requests -> repeat(minOf(requests.length(), 120)) {
+                    val item = requests.optJSONObject(it) ?: return@repeat
+                    val url = item.optString("url")
+                    if (!webUrl(url)) return@repeat
+                    val source = attribute(session, url, item.optString("page")) ?: return@repeat
+                    val video = item.optString("video")
+                    if (video.isNotEmpty() && session.relationships.size < 240) session.relationships.putIfAbsent(url, video)
+                    candidate(session, url, source, allowOpaque = true)
                 } }
+                session.observed.keys.forEach { url -> if (url !in session.seenRequests && url !in session.deferred) attribute(session, url) }
                 if (session.groups.isEmpty() && System.currentTimeMillis() - session.startedAt > 15000) session.message = "尚未发现资源，请先播放视频或重新检测"
                 changed(); pump(session)
             }
@@ -184,44 +233,78 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
         changed()
     }
 
-    private fun candidate(session: ProbeSession, url: String, ctx: RequestContext, extensionsOnly: Boolean) {
+    private fun candidate(session: ProbeSession, url: String, ctx: RequestContext, allowOpaque: Boolean = false) {
         if (closed || !session.alive || session.unsupported || !webUrl(url) || session.seenRequests.size >= 60) return
-        val path = runCatching { URI(url).path.lowercase() }.getOrDefault("")
+        val path = URI(url).path.orEmpty().lowercase()
         val hls = path.endsWith(".m3u8") || url in session.hlsHints
-        val video = Regex("\\.(mp4|webm|mov|mkv)$").containsMatchIn(path)
-        if (!hls && !video && (extensionsOnly || !Regex("(video|play|stream|download)", RegexOption.IGNORE_CASE).containsMatchIn(path) || Regex("\\.(js|css|json|ts|m4s|woff2?|png|jpg|gif|svg)$").containsMatchIn(path))) return
+        val video = VIDEO_SUFFIX.containsMatchIn(path)
+        val opaque = !hls && !video && !MEDIA_HINT.containsMatchIn(path)
+        if (!hls && !video && (ignoredResource(url) || opaque && (!allowOpaque || session.opaqueChecks >= 12))) return
         if (url in session.seenRequests) return
         if (session.pending >= 4) {
-            if (session.deferred.size < 60) session.deferred.putIfAbsent(url, ctx to extensionsOnly)
+            if (session.deferred.size < 32) {
+                val previous = session.deferred[url]
+                if (previous == null || allowOpaque && !previous.second || ctx.authorization.isNotEmpty() && previous.first.authorization.isEmpty()) {
+                    session.deferred[url] = ctx to allowOpaque
+                }
+            }
             return
         }
         session.seenRequests.add(url)
+        if (opaque) session.opaqueChecks++
         session.pending++
         workers.execute {
             if (!session.alive || closed) { main.post { session.pending-- }; return@execute }
             val result = runCatching {
-                if (hls) hlsVariants(url, ctx) else {
-                    val head = http.open(url, ctx, "HEAD")
-                    val response = if (head.status in setOf(405, 501)) { head.close(); http.open(url, ctx, headers = mapOf("Range" to "bytes=0-1023")) } else head
-                    response.use {
-                    MediaHttp.requireSuccess(response.status)
-                    if (response.mime.contains("mpegurl")) hlsVariants(url, ctx)
-                    else if (response.mime.startsWith("video/") || video && response.mime == "application/octet-stream") listOf(MediaVariant(url, MediaKind.VIDEO,
-                        size = if (response.status == 206) response.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1 else response.length, mime = response.mime)) else emptyList()
-                    }
-                }
+                if (hls) hlsVariants(url, ctx) else confirm(url, ctx, video)
             }
             main.post {
                 session.pending--
                 if (!session.alive || closed) return@post
                 result.onSuccess { variants -> if (variants.isNotEmpty()) merge(session, session.relationships[url] ?: "network:$url", session.title, variants, ctx) }
                     .onFailure { session.message = "部分候选验证失败，可播放后重新检测"; changed() }
-                session.deferred.entries.firstOrNull()?.let { (nextUrl, data) -> session.deferred.remove(nextUrl); candidate(session, nextUrl, data.first, data.second) }
+                while (session.pending < 4 && session.deferred.isNotEmpty()) {
+                    val (nextUrl, data) = session.deferred.entries.first()
+                    session.deferred.remove(nextUrl)
+                    candidate(session, nextUrl, data.first, data.second)
+                }
             }
         }
     }
+
+    private fun confirm(url: String, ctx: RequestContext, videoSuffix: Boolean): List<MediaVariant> {
+        http.open(url, ctx, "HEAD").use { head ->
+            if (head.status !in setOf(403, 405, 501)) MediaHttp.requireSuccess(head.status)
+            if (head.status in 200..299 && head.mime.contains("mpegurl")) return hlsVariants(url, ctx)
+            if (head.status in 200..299 && videoSuffix && head.mime.startsWith("video/")) return listOf(videoVariant(url, head))
+        }
+        val sample = http.open(url, ctx, headers = mapOf("Range" to "bytes=0-2047")).use { response ->
+            MediaHttp.requireSuccess(response.status)
+            val prefix = response.body.use { input ->
+                val buffer = ByteArray(2048)
+                var size = 0
+                while (size < buffer.size) {
+                    val read = input.read(buffer, size, buffer.size - size)
+                    if (read < 0) break
+                    size += read
+                }
+                buffer.decodeToString(0, size)
+            }
+            val playlist = response.mime.contains("mpegurl") || prefix.trimStart('\uFEFF', ' ', '\r', '\n', '\t').startsWith("#EXTM3U")
+            val variant = if (response.mime.startsWith("video/") && (videoSuffix || response.mime != "video/mp2t") ||
+                videoSuffix && response.mime == "application/octet-stream") videoVariant(url, response) else null
+            playlist to variant
+        }
+        return if (sample.first) hlsVariants(url, ctx) else listOfNotNull(sample.second)
+    }
+
+    private fun videoVariant(url: String, response: MediaHttp.Response) = MediaVariant(url, MediaKind.VIDEO,
+        size = if (response.status == 206) response.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1 else response.length,
+        mime = response.mime)
+
     private fun hlsVariants(url: String, ctx: RequestContext): List<MediaVariant> {
         val (finalUrl, text) = http.text(url, ctx)
+        require(text.lineSequence().any { it.trimStart().startsWith("#EXT-X-") }) { "地址没有返回 HLS 播放清单" }
         val parsed = HlsPlaylist.parse(text, finalUrl)
         return parsed.variants.ifEmpty { listOf(MediaVariant(finalUrl, MediaKind.HLS, "HLS 点播", blockedReason = parsed.blocked)) }
     }
@@ -232,8 +315,10 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
         val (url, depth) = session.queue.removeFirst()
         session.frameCount++
         helperSession = session
+        helperDepth = depth
         helper = WebView(context).apply {
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true
+            settings.userAgentString = session.userAgent
             settings.mediaPlaybackRequiresUserGesture = true
             settings.allowFileAccess = false; settings.allowContentAccess = false
             settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -261,5 +346,12 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
         helperTimer?.let(main::removeCallbacks); helperTimer = null
         helper?.apply { stopLoading(); onPause(); webViewClient = WebViewClient(); destroy() }
         helper = null; helperSession = null
+    }
+
+    private companion object {
+        val VIDEO_SUFFIX = Regex("\\.(mp4|webm|mov|mkv|m4v)$", RegexOption.IGNORE_CASE)
+        val MEDIA_HINT = Regex("video|play|stream|download|manifest|playlist")
+        val STATIC_SUFFIX = Regex("\\.(js|css|ts|m4s|woff2?|png|jpe?g|gif|svg|ico|webp|map)$", RegexOption.IGNORE_CASE)
+        fun ignoredResource(url: String) = STATIC_SUFFIX.containsMatchIn(URI(url).path.orEmpty())
     }
 }

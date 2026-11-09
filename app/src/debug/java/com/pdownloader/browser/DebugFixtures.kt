@@ -42,6 +42,24 @@ class FixtureServer(private val context: Context) : Closeable {
         val body = when {
             path == "/" -> { mime = "text/html; charset=utf-8"; page().toByteArray() }
             path == "/frame" -> { mime = "text/html"; "<video preload=\"none\" controls src=\"$base/sample.mp4?frame=1\"></video>".toByteArray() }
+            path == "/opaque-page" -> {
+                mime = "text/html"
+                extra += "Referrer-Policy: origin\r\n"
+                """
+                <video controls id="player"></video>
+                <script>
+                window.startFixture = () => {
+                  player.src = URL.createObjectURL(new Blob());
+                  fetch('/r/7f2').then(r => r.text());
+                };
+                </script>
+                """.trimIndent().toByteArray()
+            }
+            path == "/r/7f2" -> {
+                mime = "text/plain"
+                context.assets.open("media-fixture/media.m3u8").bufferedReader().use { it.readText() }
+                    .replace("segment-", "../segment-").toByteArray()
+            }
             path == "/notes.txt" -> {
                 mime = "text/plain; charset=utf-8"
                 extra += "Content-Disposition: attachment; filename=\"notes.txt\"\r\n"
