@@ -25,7 +25,16 @@ import com.pdownloader.browser.download.*
 import com.pdownloader.browser.media.*
 import java.util.concurrent.Executors
 
-enum class DownloadCategory(val title: String) { ALL("全部"), VIDEO("视频"), IMAGE("图片") }
+enum class DownloadCategory(val title: String) {
+    ALL("全部"), VIDEO("视频"), IMAGE("图片"), OTHER("其他");
+
+    internal fun matches(kind: MediaKind): Boolean = when (this) {
+        ALL -> true
+        VIDEO -> kind.isVideo
+        IMAGE -> kind == MediaKind.IMAGE
+        OTHER -> kind == MediaKind.OTHER
+    }
+}
 
 // Constructed programmatically with host callbacks; not inflated by a layout editor.
 @android.annotation.SuppressLint("ViewConstructor")
@@ -94,11 +103,18 @@ class DownloadsView(
             if (holder.task != task) {
                 holder.task = task; holder.title.text = task.title
                 card.contentDescription = "${task.title}，点击打开，长按更多操作"
-                holder.duration.visibility = if (task.variant.kind == MediaKind.IMAGE) View.GONE else View.VISIBLE
+                holder.duration.visibility = if (task.variant.kind.isVideo) View.VISIBLE else View.GONE
                 holder.duration.text = if (task.durationMs >= 0) formatMediaTime(task.durationMs) else "--:--"
-                holder.image.setImageResource(if (task.variant.kind == MediaKind.IMAGE) R.drawable.media_image_placeholder else R.drawable.media_video_placeholder)
-                images.loadDownloaded(holder.image, task, repository.folder(task.id)) { duration ->
-                    if (holder.task?.id == task.id && duration > 0) holder.duration.text = formatMediaTime(duration)
+                holder.image.tag = null
+                holder.image.setImageResource(when (task.variant.kind) {
+                    MediaKind.IMAGE -> R.drawable.media_image_placeholder
+                    MediaKind.OTHER -> R.drawable.download_file_placeholder
+                    else -> R.drawable.media_video_placeholder
+                })
+                if (task.variant.kind != MediaKind.OTHER) {
+                    images.loadDownloaded(holder.image, task, repository.folder(task.id)) { duration ->
+                        if (holder.task?.id == task.id && duration > 0) holder.duration.text = formatMediaTime(duration)
+                    }
                 }
             }
             return card
@@ -115,9 +131,17 @@ class DownloadsView(
             val cover = FrameLayout(activity)
             val image = ImageView(activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(activity.color(R.color.surface_secondary)); contentDescription = "媒体封面" }
             cover.addView(image, FrameLayout.LayoutParams(-1, -1))
-            cover.addView(BrowserIcon(activity, if (task.variant.kind == MediaKind.IMAGE) "image" else "play", if (task.variant.kind == MediaKind.IMAGE) "查看图片" else "播放视频") {
-                if (task.state == TaskState.COMPLETE) open(task) else if (task.variant.kind != MediaKind.IMAGE) online(task)
-            }.apply { foregroundColor = activity.color(R.color.accent) }, FrameLayout.LayoutParams(-1, -1))
+            val (glyph, label) = when (task.variant.kind) {
+                MediaKind.IMAGE -> "image" to "查看图片"
+                MediaKind.OTHER -> "file" to "打开文件"
+                else -> "play" to "播放视频"
+            }
+            cover.addView(BrowserIcon(activity, glyph, label) {
+                if (task.state == TaskState.COMPLETE) open(task) else if (task.variant.kind.isVideo) online(task)
+            }.apply {
+                foregroundColor = activity.color(R.color.accent)
+                if (task.state != TaskState.COMPLETE && !task.variant.kind.isVideo) { isClickable = false; isFocusable = false }
+            }, FrameLayout.LayoutParams(-1, -1))
             titleRow.addView(cover, LayoutParams(activity.dp(80), activity.dp(60)).apply { marginEnd = activity.dp(12) })
             images.load(image, task.thumbnail, task.context)
             val title = activity.label(task.title, 16f).apply { maxLines = 2; typeface = Typeface.DEFAULT_BOLD }
@@ -127,7 +151,12 @@ class DownloadsView(
             titleRow.addView(menu, LayoutParams(activity.dp(48), activity.dp(48)))
             body.addView(titleRow)
             val duration = if (task.durationMs >= 0) " · ${task.durationMs / 60000}:${(task.durationMs / 1000 % 60).toString().padStart(2, '0')}" else ""
-            body.addView(activity.label("${task.variant.quality} · ${if (task.variant.kind == MediaKind.HLS) "HLS 离线资源包" else extension(task.variant).uppercase()}$duration", 12f, true))
+            val format = when (task.variant.kind) {
+                MediaKind.HLS -> "HLS 离线资源包"
+                MediaKind.OTHER -> task.title.substringAfterLast('.', "").uppercase().ifBlank { "文件" }
+                else -> extension(task.variant).uppercase()
+            }
+            body.addView(activity.label("${task.variant.quality} · $format$duration", 12f, true))
             val stateRow = activity.row()
             val details = when {
                 task.variant.kind == MediaKind.HLS && task.partsTotal > 0 && task.state != TaskState.COMPLETE -> "${task.partsDone}/${task.partsTotal} 片段 · ${bytes(task.downloaded)}"
@@ -149,7 +178,7 @@ class DownloadsView(
                         if (paused) main.post { start() }
                     }
                 }, LayoutParams(activity.dp(48), activity.dp(48)))
-            } else if (task.state == TaskState.COMPLETE) stateRow.addView(BrowserIcon(activity, if (task.variant.kind == MediaKind.IMAGE) "image" else "play", if (task.variant.kind == MediaKind.IMAGE) "查看图片" else "播放视频") { open(task) }, LayoutParams(activity.dp(48), activity.dp(48)))
+            } else if (task.state == TaskState.COMPLETE) stateRow.addView(BrowserIcon(activity, glyph, label) { open(task) }, LayoutParams(activity.dp(48), activity.dp(48)))
             body.addView(stateRow)
             val progress = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 1000; progressTintList = android.content.res.ColorStateList.valueOf(activity.color(R.color.accent))
@@ -206,7 +235,7 @@ class DownloadsView(
         }, LayoutParams(activity.dp(48), activity.dp(48)))
         addView(bulk)
         filters.setPadding(activity.dp(12), activity.dp(4), activity.dp(12), activity.dp(4))
-        listOf(DownloadCategory.VIDEO, DownloadCategory.IMAGE).forEach { category ->
+        listOf(DownloadCategory.VIDEO, DownloadCategory.IMAGE, DownloadCategory.OTHER).forEach { category ->
             val button = activity.action(category.title) { setCategory(category) }
             filterButtons[category] = button
             filters.addView(button, LayoutParams(0, activity.dp(40), 1f).apply { marginStart = activity.dp(4); marginEnd = activity.dp(4) })
@@ -216,7 +245,7 @@ class DownloadsView(
         list.adapter = adapter
         grid.apply { numColumns = 2; horizontalSpacing = activity.dp(12); verticalSpacing = activity.dp(12)
             setPadding(activity.dp(16), activity.dp(12), activity.dp(16), activity.dp(16)); clipToPadding = false
-            stretchMode = GridView.STRETCH_COLUMN_WIDTH; adapter = gridAdapter; contentDescription = "已下载媒体网格"
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH; adapter = gridAdapter; contentDescription = "已下载文件网格"
         }
         addView(empty, LayoutParams(-1, 0, 1f))
         addView(list, LayoutParams(-1, 0, 1f))
@@ -286,19 +315,20 @@ class DownloadsView(
     }
     private fun applyFilter() {
         val next = all.filter { (it.state == TaskState.COMPLETE) == finished && it.title.contains(query, true) &&
-            (!finished || selectedCategory == DownloadCategory.ALL || (selectedCategory == DownloadCategory.IMAGE) == (it.variant.kind == MediaKind.IMAGE)) }.let {
+            (!finished || selectedCategory.matches(it.variant.kind)) }.let {
             when (sort) { 1 -> it.sortedBy { task -> task.title.lowercase() }; 2 -> it.sortedByDescending { task -> task.downloaded }; else -> it }
         }
         val changed = next != displayed
         displayed = next
-        empty.text = if (query.isNotBlank()) "没有匹配的下载" else if (finished) "还没有下载完成的媒体" else "暂无下载任务，去网页发现视频或图片吧"
+        empty.text = if (query.isNotBlank()) "没有匹配的下载" else if (finished) "还没有下载完成的${selectedCategory.title}" else "暂无下载任务"
         empty.visibility = if (displayed.isEmpty()) View.VISIBLE else View.GONE
         list.visibility = if (displayed.isEmpty() || finished) View.GONE else View.VISIBLE
         grid.visibility = if (displayed.isEmpty() || !finished) View.GONE else View.VISIBLE
         if (changed) { adapter.notifyDataSetChanged(); gridAdapter.notifyDataSetChanged() }
     }
     private fun showMenu(anchor: View, task: DownloadTask) {
-        val names = if (task.state == TaskState.COMPLETE) listOf("打开", "分享", "导出到设备", "重命名", "打开来源网页", "删除") else listOf("在线播放", "打开来源网页", "重命名", "取消并清理", "删除记录")
+        val names = if (task.state == TaskState.COMPLETE) listOf("打开", "分享", "导出到设备", "重命名", "打开来源网页", "删除")
+            else (if (task.variant.kind.isVideo) listOf("在线播放") else emptyList()) + listOf("打开来源网页", "重命名", "取消并清理", "删除记录")
         PopupMenu(activity, anchor).apply {
             names.forEachIndexed { index, text -> menu.add(0, index, index, text) }
             setOnMenuItemClickListener { item ->
@@ -306,7 +336,7 @@ class DownloadsView(
                     "打开" -> open(task)
                     "分享" -> share(task)
                     "导出到设备" -> export(task)
-                    "在线播放" -> if (task.variant.kind != MediaKind.IMAGE) online(task)
+                    "在线播放" -> online(task)
                     "打开来源网页" -> source(task.context.pageUrl)
                     "重命名" -> {
                         val input = EditText(activity).apply { setText(task.title); setSingleLine(true) }

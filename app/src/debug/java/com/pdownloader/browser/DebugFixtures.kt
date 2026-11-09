@@ -42,6 +42,11 @@ class FixtureServer(private val context: Context) : Closeable {
         val body = when {
             path == "/" -> { mime = "text/html; charset=utf-8"; page().toByteArray() }
             path == "/frame" -> { mime = "text/html"; "<video preload=\"none\" controls src=\"$base/sample.mp4?frame=1\"></video>".toByteArray() }
+            path == "/notes.txt" -> {
+                mime = "text/plain; charset=utf-8"
+                extra += "Content-Disposition: attachment; filename=\"notes.txt\"\r\n"
+                "测试附件\n".toByteArray()
+            }
             path == "/master.m3u8" -> { mime = "application/vnd.apple.mpegurl"; "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=160x288\nmedia.m3u8?quality=288\n#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=80x144\nmedia.m3u8?quality=144\n".toByteArray() }
             path == "/redirect.mp4" -> { status = 302; extra += "Location: $base/sample.mp4\r\n"; ByteArray(0) }
             path == "/protected.mp4" && headers["cookie"]?.contains("fixture=yes") != true -> { status = 403; ByteArray(0) }

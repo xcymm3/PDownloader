@@ -56,8 +56,12 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
         require(variant.blockedReason.isEmpty()) { variant.blockedReason }
         require(webUrl(variant.url)) { "无效的媒体地址" }
         val key = stableId(variant.id + context.pageUrl)
-        readableDatabase.rawQuery("SELECT payload FROM tasks WHERE dedup=? AND state!=? LIMIT 1", arrayOf(key, TaskState.CANCELLED.name)).use {
-            if (it.moveToFirst()) return decode(it.getString(0)) to false
+        val legacyKey = if (variant.kind == MediaKind.OTHER) stableId(variant.copy(kind = MediaKind.VIDEO).id + context.pageUrl) else key
+        readableDatabase.rawQuery("SELECT payload FROM tasks WHERE dedup IN (?,?) AND state!=?", arrayOf(key, legacyKey, TaskState.CANCELLED.name)).use {
+            while (it.moveToNext()) {
+                val existing = decode(it.getString(0))
+                if (existing.variant.kind == variant.kind) return existing to false
+            }
         }
         val task = DownloadTask(UUID.randomUUID().toString(), title.take(200), variant, context, thumbnail = thumbnail, durationMs = durationMs, saveToPublic = saveToPublic)
         val values = ContentValues().apply {
@@ -149,7 +153,12 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
             put("saveToPublic", task.saveToPublic); put("publicUri", task.publicUri)
         }
         fun decode(json: String): DownloadTask = JSONObject(json).let {
-            DownloadTask(it.getString("id"), it.getString("title"), MediaVariant(it.getString("url"), MediaKind.valueOf(it.getString("kind")), it.optString("quality"), it.optInt("height"), mime = it.optString("mime")),
+            val url = it.getString("url")
+            val mime = it.optString("mime")
+            val storedKind = MediaKind.valueOf(it.getString("kind"))
+            val kind = if (storedKind == MediaKind.VIDEO && specificMime(mime) != null && downloadKind(url, mime) == MediaKind.OTHER)
+                MediaKind.OTHER else storedKind
+            DownloadTask(it.getString("id"), it.getString("title"), MediaVariant(url, kind, it.optString("quality"), it.optInt("height"), mime = mime),
                 RequestContext(it.getString("page"), it.optString("ua"), it.optString("referer"), it.optString("credentialOrigin"), it.optString("authorization")),
                 TaskState.valueOf(it.getString("state")), it.optLong("downloaded"), it.optLong("total", -1), it.optInt("partsDone"), it.optInt("partsTotal"), it.optString("error"), it.optString("validator"), it.optString("output"), it.optString("thumbnail"), it.optLong("durationMs", -1), it.optBoolean("saveToPublic"), it.optString("publicUri"))
         }

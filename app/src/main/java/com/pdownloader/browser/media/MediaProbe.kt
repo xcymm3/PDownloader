@@ -103,9 +103,8 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
     fun observeUrl(session: ProbeSession?, url: String) {
         if (session?.alive == true && url in session.relationships) candidate(session, url, session.requestContexts[url] ?: RequestContext(session.pageUrl, session.userAgent), true)
     }
-    fun direct(session: ProbeSession, url: String, mime: String, size: Long) {
-        if (!session.alive || !webUrl(url) || session.unsupported) return
-        val kind = if (mime.startsWith("image/")) MediaKind.IMAGE else if (mime.contains("mpegurl") || url.substringBefore('?').endsWith(".m3u8", true)) MediaKind.HLS else MediaKind.VIDEO
+    fun direct(session: ProbeSession, url: String, mime: String, size: Long, kind: MediaKind = downloadKind(url, mime)) {
+        if (!session.alive || !webUrl(url) || session.unsupported || kind == MediaKind.OTHER) return
         if (kind == MediaKind.HLS) {
             if (session.hlsHints.size < 60) session.hlsHints.add(url)
             candidate(session, url, RequestContext(session.pageUrl, session.userAgent), false)

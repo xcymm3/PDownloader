@@ -3,7 +3,11 @@ package com.pdownloader.browser.media
 import java.net.URI
 import java.security.MessageDigest
 
-enum class MediaKind { VIDEO, IMAGE, HLS }
+enum class MediaKind {
+    VIDEO, IMAGE, HLS, OTHER;
+
+    val isVideo get() = this == VIDEO || this == HLS
+}
 
 data class RequestContext(
     val pageUrl: String,
@@ -53,6 +57,36 @@ fun safeFileName(title: String, extension: String): String {
         .let { if (it.lastOrNull()?.isHighSurrogate() == true) it.dropLast(1) else it }.ifBlank { "媒体" }
     val suffix = extension.lowercase().replace(Regex("[^a-z0-9]"), "").take(8)
     return if (suffix.isEmpty() || base.endsWith(".$suffix", true)) base else "$base.$suffix"
+}
+
+internal fun otherFileName(name: String): String {
+    val leaf = name.substringAfterLast('/').substringAfterLast('\\')
+    val suffix = leaf.substringAfterLast('.', "")
+    return if (suffix.matches(Regex("[A-Za-z0-9]{1,8}")) && leaf.substringBeforeLast('.').isNotBlank())
+        safeFileName(leaf.substringBeforeLast('.'), suffix)
+    else safeFileName(leaf, "")
+}
+
+internal fun specificMime(mime: String): String? =
+    mime.substringBefore(';').trim().lowercase().takeUnless {
+        it.isEmpty() || it in setOf("application/octet-stream", "binary/octet-stream", "application/force-download", "application/download", "application/x-download", "*/*")
+    }
+
+internal fun downloadKind(url: String, mime: String, fileName: String = ""): MediaKind {
+    val type = specificMime(mime)
+    val path = runCatching { URI(url).path.orEmpty() }.getOrDefault("")
+    if (type?.startsWith("image/") == true) return MediaKind.IMAGE
+    if (type?.contains("mpegurl") == true || ((type == null || type.startsWith("video/")) &&
+            (fileName.endsWith(".m3u8", true) || path.endsWith(".m3u8", true)))) return MediaKind.HLS
+    if (type?.startsWith("video/") == true || type in setOf("application/mp4", "application/dash+xml")) return MediaKind.VIDEO
+    if (type != null && type !in setOf("application/ogg", "application/x-matroska")) return MediaKind.OTHER
+    for (name in listOf(fileName, path)) {
+        when (name.substringAfterLast('.', "").lowercase()) {
+            "mp4", "webm", "mov", "mkv", "m4v", "avi", "ts", "3gp", "mpg", "mpeg", "ogv", "flv" -> return MediaKind.VIDEO
+            "jpg", "jpeg", "png", "webp", "gif", "avif", "svg", "bmp", "ico", "heic", "heif", "tiff" -> return MediaKind.IMAGE
+        }
+    }
+    return MediaKind.OTHER
 }
 
 fun extension(variant: MediaVariant): String {

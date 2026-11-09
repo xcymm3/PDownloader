@@ -23,6 +23,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
+import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -497,11 +498,34 @@ class MainActivity : ThemedActivity() {
             }
             override fun onHideCustomView() { exitFullscreen() }
         }
-        setDownloadListener { url, _, _, mime, length ->
-            val session = tab.probeSession ?: probe.begin(tab.id, tab.url, settings.userAgentString, tab.title).also { tab.probeSession = it }
-            probe.direct(session, url, mime.orEmpty(), length)
-            if (tab.id == selectedId) showMedia(mime?.startsWith("image/") == true)
+        setDownloadListener { url, userAgent, disposition, mime, length ->
+            if (!webUrl(url)) {
+                if (tab.id == selectedId) toast("此下载地址暂不支持")
+                return@setDownloadListener
+            }
+            val type = mime.orEmpty()
+            val fileName = URLUtil.guessFileName(url, disposition, type)
+            val kind = downloadKind(url, type, fileName)
+            if (kind == MediaKind.OTHER) {
+                if (tab.id == selectedId && section == 0 && browser.isShown) {
+                    offerFileDownload(url, type, length, fileName, RequestContext(tab.url, userAgent ?: settings.userAgentString))
+                }
+            } else {
+                val session = tab.probeSession ?: probe.begin(tab.id, tab.url, settings.userAgentString, tab.title).also { tab.probeSession = it }
+                probe.direct(session, url, type, length, kind)
+                if (tab.id == selectedId && section == 0 && browser.isShown) showMedia(kind == MediaKind.IMAGE)
+            }
         }
+    }
+
+    private fun offerFileDownload(url: String, mime: String, length: Long, fileName: String, context: RequestContext) {
+        val title = otherFileName(fileName)
+        val file = MediaVariant(url, MediaKind.OTHER, size = length, mime = mime)
+        val group = MediaGroup(stableId(url), title, context = context)
+        AlertDialog.Builder(this).setTitle("下载文件？").setMessage("$title\n${bytes(length)}")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("下载") { _, _ -> submitDownloads(listOf(group to file)) }
+            .show()
     }
 
     private fun offerExternal(uri: Uri) {
@@ -938,7 +962,24 @@ class MainActivity : ThemedActivity() {
         startActivity(Intent(this, PlayerActivity::class.java).putExtra("preview", DownloadRepository.encode(task).toString()))
     }
     private fun openDownloaded(task: DownloadTask) {
-        if (task.variant.kind == MediaKind.IMAGE) {
+        if (task.variant.kind == MediaKind.OTHER) {
+            io.execute {
+                val result = runCatching { downloadContentUri(task) }
+                runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
+                    result.onSuccess { uri ->
+                        try {
+                            startActivity(Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, downloadMime(task))
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            })
+                        } catch (_: android.content.ActivityNotFoundException) {
+                            toast("没有可打开此文件的应用，可以长按分享或导出")
+                        }
+                    }.onFailure { toast("本地文件无法读取") }
+                }
+            }
+        } else if (task.variant.kind == MediaKind.IMAGE) {
             io.execute {
                 val repository = DownloadRepository.get(this)
                 val tasks = repository.all().filter { it.state == TaskState.COMPLETE && it.variant.kind == MediaKind.IMAGE && canRead(repository.playbackUri(it)) }
@@ -962,22 +1003,32 @@ class MainActivity : ThemedActivity() {
 
     private fun shareDownloaded(task: DownloadTask) {
         io.execute {
-            val result = runCatching {
-                val source = exportSource(task)
-                if (source.scheme == "file") FileProvider.getUriForFile(this, "$packageName.files", File(requireNotNull(source.path))) else source
-            }
+            val result = runCatching { downloadContentUri(task) }
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
                 result.onSuccess { uri ->
                     startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                        type = if (task.variant.kind == MediaKind.HLS) "application/zip" else task.variant.mime.ifBlank { if (task.variant.kind == MediaKind.IMAGE) "image/*" else "video/*" }
+                        type = downloadMime(task)
                         putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         clipData = android.content.ClipData.newRawUri(task.title, uri)
-                    }, if (task.variant.kind == MediaKind.HLS) "分享 HLS 离线资源包（ZIP，非 MP4）" else "分享媒体文件"))
+                    }, if (task.variant.kind == MediaKind.HLS) "分享 HLS 离线资源包（ZIP，非 MP4）" else "分享文件"))
                 }.onFailure { toast("无法分享文件，请检查本地文件和存储空间") }
             }
         }
     }
+    private fun downloadContentUri(task: DownloadTask): Uri = exportSource(task).let { source ->
+        if (source.scheme == "file") FileProvider.getUriForFile(this, "$packageName.files", File(requireNotNull(source.path))) else source
+    }
+
+    private fun downloadMime(task: DownloadTask): String =
+        if (task.variant.kind == MediaKind.HLS) "application/zip"
+        else specificMime(task.variant.mime)
+            ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(task.output.substringAfterLast('.', "").lowercase())
+            ?: when (task.variant.kind) {
+                MediaKind.IMAGE -> "image/*"
+                MediaKind.VIDEO -> "video/*"
+                else -> "application/octet-stream"
+            }
     private fun canRead(uri: Uri): Boolean = runCatching {
         contentResolver.openFileDescriptor(uri, "r")?.use { true } == true
     }.getOrDefault(false)
@@ -1005,8 +1056,10 @@ class MainActivity : ThemedActivity() {
         if (hls) toast("HLS 将导出为离线资源包 ZIP，解压后可播放，非单个 MP4")
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = if (hls) "application/zip" else task.variant.mime.ifBlank { "application/octet-stream" }
-            putExtra(Intent.EXTRA_TITLE, safeFileName(task.title, if (hls) "zip" else extension(task.variant)))
+            type = downloadMime(task)
+            val name = if (task.variant.kind == MediaKind.OTHER) task.output.ifBlank { otherFileName(task.title) }
+                else safeFileName(task.title, if (hls) "zip" else extension(task.variant))
+            putExtra(Intent.EXTRA_TITLE, name)
         }, 701)
     }
     @Deprecated("Platform Activity result API retained for the native View shell")

@@ -57,8 +57,13 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         http.open(task.variant.url, task.context, headers = headers).use { response ->
             check(id)
             MediaHttp.requireSuccess(response.status)
-            require(!response.mime.contains("html") && !response.mime.contains("mpegurl")) { "服务器返回了网页或清单，请回原网页重新检测" }
-            require(!response.mime.startsWith("text/") && !response.mime.contains("json")) { "服务器返回了文本数据，未获得有效媒体" }
+            val attachment = response.header("Content-Disposition")?.substringBefore(';')?.trim().equals("attachment", true)
+            require(!response.mime.contains("mpegurl") && (!response.mime.contains("html") || task.variant.kind == MediaKind.OTHER && attachment)) {
+                "服务器返回了网页或清单，请回原网页重新检测"
+            }
+            if (task.variant.kind != MediaKind.OTHER) {
+                require(!response.mime.startsWith("text/") && !response.mime.contains("json")) { "服务器返回了文本数据，未获得有效媒体" }
+            }
             if (response.status == 206) {
                 val start = response.header("Content-Range")?.substringAfter("bytes ")?.substringBefore('-')?.toLongOrNull()
                 require(start == offset) { "服务器返回的断点位置不一致，请重新下载" }
@@ -80,15 +85,16 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
                     }
                 }
             }
-            require(copied > 0 && (total < 0 || copied == total)) { "传输不完整，请继续下载" }
+            require((copied > 0 || task.variant.kind == MediaKind.OTHER && total == 0L) && (total < 0 || copied == total)) { "传输不完整，请继续下载" }
             check(id)
-            val mimeVariant = task.variant.copy(mime = response.mime.ifEmpty { task.variant.mime })
-            val output = File(folder, safeFileName(task.title, extension(mimeVariant)))
+            val mimeVariant = task.variant.copy(mime = specificMime(response.mime) ?: task.variant.mime.ifBlank { response.mime })
+            val name = if (task.variant.kind == MediaKind.OTHER) otherFileName(task.title) else safeFileName(task.title, extension(mimeVariant))
+            val output = File(folder, name)
             val completed: (DownloadTask) -> DownloadTask = {
                 it.copy(state = TaskState.COMPLETE, downloaded = copied, total = copied, output = output.name, variant = mimeVariant, error = "")
             }
             if (task.saveToPublic) {
-                val mime = mimeVariant.mime.takeUnless { it.isBlank() || it == "application/octet-stream" }
+                val mime = specificMime(mimeVariant.mime)
                     ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(output.extension)
                     ?: "application/octet-stream"
                 publish(id, partial, output.name, mime, completed)

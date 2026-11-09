@@ -71,6 +71,19 @@ class MediaDownloadTest {
         assertEquals(1, bitmap.height)
         bitmap.recycle()
     }
+
+    @Test fun legacyFileDownloadIsReadAsOtherWithoutChangingItsPath() {
+        val legacy = DownloadTask("legacy", "报告", MediaVariant(server.base + "/report", MediaKind.VIDEO, mime = "application/pdf"),
+            RequestContext(server.base + "/", "FixtureAgent"), state = TaskState.COMPLETE, output = "报告.bin", publicUri = "content://example/report")
+        val restored = DownloadRepository.decode(DownloadRepository.encode(legacy).toString())
+        assertEquals(MediaKind.OTHER, restored.variant.kind)
+        assertEquals(legacy.output, restored.output)
+        assertEquals(legacy.publicUri, restored.publicUri)
+        assertEquals(MediaKind.HLS, downloadKind(server.base + "/movie.m3u8", "application/octet-stream"))
+        assertEquals(MediaKind.VIDEO, downloadKind(server.base + "/get", "application/octet-stream", "movie.mp4"))
+        assertEquals(MediaKind.IMAGE, downloadKind(server.base + "/get", "image/png"))
+        assertEquals(MediaKind.OTHER, downloadKind(server.base + "/get", "audio/mpeg"))
+    }
     @Test fun foregroundDownloadSurvivesBrowserActivityDestruction() {
         val task = enqueue("/slow.mp4")
         ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->

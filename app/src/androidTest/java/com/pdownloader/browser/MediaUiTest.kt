@@ -44,8 +44,14 @@ class MediaUiTest {
     @Test fun filtersShowExactlyOneSelectedCategoryAndTheMatchingFiles() {
         val video = task("/sample.mp4", MediaKind.VIDEO)
         val photo = task("/picture.png", MediaKind.IMAGE)
+        val other = repository.enqueue("notes.txt", MediaVariant(server.base + "/notes.txt", MediaKind.OTHER, mime = "text/plain"), photo.context)
+            .first.also { ids.add(it.id) }
         val engine = DownloadEngine(repository, MediaHttp(allowLocalTests = true))
-        engine.run(video.id); engine.run(photo.id)
+        engine.run(video.id); engine.run(photo.id); engine.run(other.id)
+        val downloaded = requireNotNull(repository.get(other.id))
+        assertEquals(TaskState.COMPLETE, downloaded.state)
+        assertEquals("notes.txt", downloaded.output)
+        assertEquals("测试附件\n", File(repository.folder(other.id), downloaded.output).readText())
         ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java).putExtra("section", 2)).use { scenario ->
             var screen: DownloadsView? = null
             scenario.onActivity { activity ->
@@ -53,7 +59,7 @@ class MediaUiTest {
                 screen!!.show(true)
             }
             await { onMain { descendants(screen!!).filterIsInstance<GridView>().single().adapter.count == 1 } }
-            for ((category, expectedId) in listOf(DownloadCategory.IMAGE to photo.id, DownloadCategory.VIDEO to video.id)) {
+            for ((category, expectedId) in listOf(DownloadCategory.IMAGE to photo.id, DownloadCategory.VIDEO to video.id, DownloadCategory.OTHER to other.id)) {
                 scenario.onActivity { screen!!.setCategory(category) }
                 scenario.onActivity {
                     val list = descendants(screen!!).filterIsInstance<GridView>().single()
@@ -64,7 +70,7 @@ class MediaUiTest {
                     assertTrue(buttons.single { it.isSelected }.text.contains(category.title))
                 }
                 if (category == DownloadCategory.IMAGE) capture("download-grid-image")
-                else {
+                else if (category == DownloadCategory.VIDEO) {
                     await { onMain { descendants(screen!!).filterIsInstance<ImageView>().any { it.drawable is android.graphics.drawable.BitmapDrawable } } }
                     capture("download-grid-video")
                 }
