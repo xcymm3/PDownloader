@@ -111,6 +111,29 @@ class HomeHistoryTest {
         }
     }
 
+    @Test fun homeSearchShowsOpenTabsBookmarksAndHistoryTogether() {
+        store.save("bookmarks", "联想收藏", "https://pdownloader.test/saved")
+        store.save("history", "联想历史", "https://pdownloader.test/visited")
+        launch().use { scenario ->
+            scenario.onActivity { activity ->
+                activity.openNewTab("https://pdownloader.test/video")
+                activity.openNewTab()
+                val home = descendants(activity.window.decorView).filterIsInstance<HomePageView>().single()
+                val field = descendants(home).filterIsInstance<EditText>().single()
+                assertTrue(field.requestFocus())
+                home.query = "pdownloader.test"
+            }
+            await {
+                scenario.check { activity ->
+                    val visible = descendants(activity.window.decorView).filterIsInstance<android.widget.TextView>()
+                        .filter { it.isShown }.map { it.text.toString() }.toList()
+                    visible.any { it.endsWith("· 切换标签") } &&
+                        "联想收藏  ·  收藏" in visible && "联想历史  ·  历史" in visible
+                }
+            }
+        }
+    }
+
     @Test fun lightAndDarkPagesHavePassiveScreenshots() {
         val entries = listOf("百度" to "https://www.baidu.com/", "Google" to "https://www.google.com/", "哔哩哔哩" to "https://www.bilibili.com/", "YouTube" to "https://www.youtube.com/", "X" to "https://x.com/", "Instagram" to "https://www.instagram.com/")
         entries.forEach { (title, url) -> store.save("history", "$title · 界面测试记录", url) }
