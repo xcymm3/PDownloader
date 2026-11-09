@@ -68,6 +68,12 @@ class FixtureServer(private val context: Context) : Closeable {
             path == "/master.m3u8" -> { mime = "application/vnd.apple.mpegurl"; "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=160x288\nmedia.m3u8?quality=288\n#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=80x144\nmedia.m3u8?quality=144\n".toByteArray() }
             path == "/redirect.mp4" -> { status = 302; extra += "Location: $base/sample.mp4\r\n"; ByteArray(0) }
             path == "/protected.mp4" && headers["cookie"]?.contains("fixture=yes") != true -> { status = 403; ByteArray(0) }
+            path == "/login.mp4" -> { status = 401; ByteArray(0) }
+            path == "/expired" -> { status = 410; ByteArray(0) }
+            path == "/changed-range.mp4" -> {
+                extra = "ETag: \"fixture-v2\"\r\nAccept-Ranges: bytes\r\n"
+                context.assets.open("media-fixture/sample.mp4").use { it.readBytes() }
+            }
             path == "/picture.png" -> {
                 mime = "image/png"
                 java.io.ByteArrayOutputStream().use { output ->

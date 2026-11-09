@@ -3,10 +3,12 @@ package com.pdownloader.browser.download
 import android.net.Uri
 import com.pdownloader.browser.media.*
 import java.io.File
+import java.io.IOException
 
 /** Each worker owns its engine and progress throttle for one transfer. */
 class DownloadEngine(private val repository: DownloadRepository, private val http: MediaHttp, private val stopped: () -> Boolean = { false }) {
     class Stopped : Exception()
+    private class SourceUnavailable(message: String) : IOException(message)
     private var lastProgress = 0L
 
     fun run(id: String) {
@@ -19,6 +21,13 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         val task = claimed ?: return
         try {
             repository.folder(id).mkdirs()
+            if (task.resetPartial) {
+                repository.folder(id).listFiles().orEmpty().forEach { file ->
+                    check(id)
+                    require(!file.exists() || file.isFile && file.delete()) { "无法清理旧下载进度" }
+                }
+                change(id) { it.copy(resetPartial = false) }
+            }
             if (task.publicUri.isNotBlank()) {
                 repository.publicDownloads.delete(Uri.parse(task.publicUri))
                 change(id) { it.copy(publicUri = "") }
@@ -41,7 +50,7 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         } catch (_: Stopped) {
             // The task already has the requested state, including QUEUED after a quick resume.
         } catch (error: Exception) {
-            change(id) { it.copy(state = TaskState.FAILED, error = message(error)) }
+            change(id) { it.copy(state = TaskState.FAILED, failure = failure(error), error = message(error)) }
         } finally {
             if (repository.get(id)?.state in setOf(null, TaskState.CANCELLED)) repository.folder(id).deleteRecursively()
         }
@@ -54,19 +63,28 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         var offset = if (partial.exists() && task.validator.isNotBlank()) partial.length() else 0L
         if (task.total > 0 && offset >= task.total) offset = 0
         val headers = if (offset > 0) mapOf("Range" to "bytes=$offset-", "If-Range" to task.validator) else emptyMap()
-        http.open(task.variant.url, task.context, headers = headers).use { response ->
+        var connection = http.open(task.variant.url, task.context, headers = headers)
+        if (offset > 0 && (connection.status == 416 || connection.status == 206 && !validRange(connection, task, offset))) {
+            connection.close()
+            offset = 0
+            check(id)
+            connection = http.open(task.variant.url, task.context)
+        }
+        connection.use { response ->
             check(id)
             MediaHttp.requireSuccess(response.status)
             val attachment = response.header("Content-Disposition")?.substringBefore(';')?.trim().equals("attachment", true)
-            require(!response.mime.contains("mpegurl") && (!response.mime.contains("html") || task.variant.kind == MediaKind.OTHER && attachment)) {
-                "服务器返回了网页或清单，请回原网页重新检测"
+            if (response.mime.contains("mpegurl") || response.mime.contains("html") && !(task.variant.kind == MediaKind.OTHER && attachment)) {
+                throw SourceUnavailable("服务器返回了网页或清单，请回原页重新检测")
             }
             if (task.variant.kind != MediaKind.OTHER) {
-                require(!response.mime.startsWith("text/") && !response.mime.contains("json")) { "服务器返回了文本数据，未获得有效媒体" }
+                if (response.mime.startsWith("text/") || response.mime.contains("json")) {
+                    throw SourceUnavailable("服务器返回了文本数据，请回原页重新检测")
+                }
             }
             if (response.status == 206) {
                 val start = response.header("Content-Range")?.substringAfter("bytes ")?.substringBefore('-')?.toLongOrNull()
-                require(start == offset) { "服务器返回的断点位置不一致，请重新下载" }
+                if (start != offset) throw SourceUnavailable("服务器返回的断点位置不一致，请回原页重新检测")
             } else offset = 0
             val total = if (response.status == 206) response.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1 else response.length
             val validator = response.header("ETag")?.takeUnless { it.startsWith("W/") } ?: response.header("Last-Modified") ?: ""
@@ -85,7 +103,9 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
                     }
                 }
             }
-            require((copied > 0 || task.variant.kind == MediaKind.OTHER && total == 0L) && (total < 0 || copied == total)) { "传输不完整，请继续下载" }
+            if (!((copied > 0 || task.variant.kind == MediaKind.OTHER && total == 0L) && (total < 0 || copied == total))) {
+                throw IOException("传输不完整，请继续下载")
+            }
             check(id)
             val mimeVariant = task.variant.copy(mime = specificMime(response.mime) ?: task.variant.mime.ifBlank { response.mime })
             val name = if (task.variant.kind == MediaKind.OTHER) otherFileName(task.title) else safeFileName(task.title, extension(mimeVariant))
@@ -106,9 +126,20 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         }
     }
 
+    private fun validRange(response: MediaHttp.Response, task: DownloadTask, offset: Long): Boolean {
+        val range = response.header("Content-Range") ?: return false
+        val start = range.substringAfter("bytes ").substringBefore('-').toLongOrNull()
+        val total = range.substringAfter('/').toLongOrNull()
+        val validator = response.header("ETag")?.takeUnless { it.startsWith("W/") } ?: response.header("Last-Modified")
+        return start == offset && validator == task.validator && (task.total <= 0 || total == task.total)
+    }
+
     private fun hls(id: String) {
         val task = repository.get(id) ?: throw Stopped()
         val (url, text) = http.text(task.variant.url, task.context)
+        if (!text.trimStart('\uFEFF', ' ', '\r', '\n', '\t').startsWith("#EXTM3U")) {
+            throw SourceUnavailable("地址未返回播放清单，请回原页重新检测")
+        }
         val playlist = HlsPlaylist.parse(text, url)
         require(playlist.blocked.isEmpty()) { playlist.blocked }
         require(playlist.variants.isEmpty()) { "请选择具体清晰度后再下载" }
@@ -129,7 +160,9 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
                 val headers = if (part.length > 0) mapOf("Range" to "bytes=${part.offset}-${part.offset + part.length - 1}") else emptyMap()
                 http.open(part.url, task.context, headers = headers).use { response ->
                     MediaHttp.requireSuccess(response.status)
-                    require(!response.mime.contains("html")) { "分片地址返回了网页" }
+                    if (response.mime.contains("html") || response.mime.startsWith("text/") || response.mime.contains("json")) {
+                        throw SourceUnavailable("分片地址未返回媒体，请回原页重新检测")
+                    }
                     if (part.length > 0) {
                         val start = response.header("Content-Range")?.substringAfter("bytes ")?.substringBefore('-')?.toLongOrNull()
                         require(response.status == 206 && start == part.offset) { "分片服务器不支持所需字节范围" }
@@ -146,7 +179,9 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
                             report(id) { it.copy(downloaded = copied + count) }
                         }
                     } }
-                    require(count > 0 && (part.length < 0 || count == part.length) && (response.length < 0 || response.length == count)) { "分片传输不完整" }
+                    if (count <= 0 || part.length >= 0 && count != part.length || response.length >= 0 && response.length != count) {
+                        throw IOException("分片传输不完整，请继续下载")
+                    }
                     check(id)
                     require(partial.renameTo(target)) { "无法保存分片" }
                 }
@@ -215,7 +250,21 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         if (now - lastProgress > 600) { lastProgress = now; change(id, transform) }
     }
     private fun File.outputStreamAppend(append: Boolean) = java.io.FileOutputStream(this, append)
+    private fun failure(error: Exception): DownloadFailure = when (error) {
+        is MediaHttp.HttpFailure -> when (error.code) {
+            401 -> DownloadFailure.LOGIN
+            403 -> DownloadFailure.FORBIDDEN
+            404, 410 -> DownloadFailure.SOURCE
+            408, 429, in 500..599 -> DownloadFailure.NETWORK
+            else -> DownloadFailure.OTHER
+        }
+        is SourceUnavailable -> DownloadFailure.SOURCE
+        is java.io.FileNotFoundException -> DownloadFailure.OTHER
+        is IOException -> DownloadFailure.NETWORK
+        else -> DownloadFailure.OTHER
+    }
     private fun message(error: Exception): String = when {
+        is SourceUnavailable -> error.message.orEmpty()
         error is java.net.SocketTimeoutException -> "网络超时，点击继续重试"
         error is java.net.UnknownHostException -> "网络不可用或无法解析资源域名"
         error is SecurityException -> "无法访问公共下载目录，请检查存储权限后继续"

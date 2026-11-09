@@ -60,7 +60,8 @@ class MainActivity : ThemedActivity() {
         var web: WebView? = null, var state: Bundle? = null,
         var preview: Bitmap? = null,
         var touched: Long = 0, var failed: Boolean = false,
-        @Volatile var probeSession: ProbeSession? = null
+        @Volatile var probeSession: ProbeSession? = null,
+        var recovery: DownloadTask? = null
     )
     private val tabs = mutableListOf<Tab>()
     private var selectedId = ""
@@ -213,6 +214,7 @@ class MainActivity : ThemedActivity() {
         placeholder = column().apply { visibility = View.GONE }
         fun downloadPage(completed: Boolean) = DownloadsView(this, mediaImages,
             source = { url -> selectSection(0); load(url) },
+            recover = ::openRecovery,
             online = { task -> previewTask(task.copy(state = TaskState.QUEUED)) },
             open = ::openDownloaded, export = ::exportDownloaded, share = ::shareDownloaded, start = ::startDownloads,
             completedPage = completed)
@@ -522,6 +524,11 @@ class MainActivity : ThemedActivity() {
         val title = otherFileName(fileName)
         val file = MediaVariant(url, MediaKind.OTHER, size = length, mime = mime)
         val group = MediaGroup(stableId(url), title, context = context)
+        val recovery = recoveryFor(context.pageUrl)?.takeIf { it.variant.kind == MediaKind.OTHER }
+        if (recovery != null) {
+            confirmRecovery(recovery, group, file)
+            return
+        }
         AlertDialog.Builder(this).setTitle("下载文件？").setMessage("$title\n${bytes(length)}")
             .setNegativeButton("取消", null)
             .setPositiveButton("下载") { _, _ -> submitDownloads(listOf(group to file)) }
@@ -750,22 +757,36 @@ class MainActivity : ThemedActivity() {
 
     private fun restoreSession() {
         val preferences = getSharedPreferences("session", MODE_PRIVATE)
+        val pending = mutableMapOf<Tab, String>()
         runCatching {
             val values = JSONArray(preferences.getString("tabs", "[]"))
             for (i in 0 until minOf(values.length(), 32)) {
                 val value = values.getJSONObject(i)
                 val url = value.optString("url").takeIf { it.isEmpty() || AddressResolver.isWebUrl(it) } ?: ""
                 val id = value.optString("id").takeIf { it.isNotBlank() && tabs.none { tab -> tab.id == it } } ?: UUID.randomUUID().toString()
-                tabs.add(Tab(id, url, value.optString("title", "新标签页")))
+                val tab = Tab(id, url, value.optString("title", "新标签页"))
+                tabs.add(tab)
+                value.optString("recovery").takeIf(String::isNotBlank)?.let { pending[tab] = it }
             }
         }
         if (tabs.isEmpty()) tabs.add(Tab())
         selectedId = preferences.getString("selected", null)?.takeIf { id -> tabs.any { it.id == id } } ?: tabs.first().id
+        if (pending.isNotEmpty()) io.execute {
+            val repository = DownloadRepository.get(this)
+            val tasks = pending.entries.mapNotNull { (tab, id) ->
+                repository.get(id)?.takeIf { it.state == TaskState.FAILED }?.let { tab to it }
+            }
+            runOnUiThread {
+                if (!isDestroyed) tasks.forEach { (tab, task) ->
+                    if (tabs.any { it === tab } && tab.recovery == null) tab.recovery = task
+                }
+            }
+        }
     }
     private fun persistSession() {
         if (tabs.isEmpty()) return
         val data = JSONArray()
-        tabs.forEach { data.put(JSONObject().put("id", it.id).put("url", it.url).put("title", it.title)) }
+        tabs.forEach { data.put(JSONObject().put("id", it.id).put("url", it.url).put("title", it.title).put("recovery", it.recovery?.id)) }
         getSharedPreferences("session", MODE_PRIVATE).edit().putString("tabs", data.toString()).putString("selected", selectedId).apply()
     }
 
@@ -848,9 +869,63 @@ class MainActivity : ThemedActivity() {
         val session = current.probeSession ?: run { toast("请先打开网页，并尝试播放视频"); return }
         if (mediaSheet?.isShowing() == true) return
         hideKeyboard()
-        mediaSheet = MediaSheet(this, session, mediaImages, submit = ::submitDownloads, previewVideo = { group, variant ->
+        val recovery = recoveryFor(session.pageUrl)
+        mediaSheet = MediaSheet(this, session, mediaImages, submit = { selected ->
+            if (recovery == null) submitDownloads(selected)
+            else {
+                val item = selected.singleOrNull()?.takeIf { it.second.kind == recovery.variant.kind }
+                if (item == null) toast("请选择一个与原任务类型相同的资源")
+                else confirmRecovery(recovery, item.first, item.second)
+            }
+        }, previewVideo = { group, variant ->
             previewTask(DownloadTask(java.util.UUID.randomUUID().toString(), group.title, variant, variant.requestContext ?: group.context))
-        }, retry = ::rescan).also { it.show(imagesFirst) }
+        }, retry = ::rescan, recoveryTitle = recovery?.title).also { it.show(imagesFirst) }
+    }
+
+    private fun openRecovery(task: DownloadTask) {
+        val url = task.context.pageUrl
+        if (!webUrl(url)) { toast("原网页地址不可用"); return }
+        selectSection(0)
+        hideKeyboard()
+        val previous = tabs.firstOrNull { it.recovery?.id == task.id }
+        val tab = if (previous != null) {
+            showTab(previous.id)
+            if (previous.url != url) load(url) else if (task.failure == DownloadFailure.SOURCE) current.web?.reload()
+            previous
+        } else if (tabs.size < 32) newTab(url) ?: return else {
+            load(url)
+            current
+        }
+        tab.recovery = task
+        persistSession()
+        toast(if (task.failure == DownloadFailure.LOGIN) "登录后，在原网页打开资源面板恢复任务"
+            else "打开原资源后，选择右下角资源图标恢复任务")
+    }
+
+    private fun recoveryFor(page: String): DownloadTask? = current.recovery?.takeIf {
+        origin(page).isNotEmpty() && origin(page) == origin(it.context.pageUrl)
+    }
+
+    private fun confirmRecovery(task: DownloadTask, group: MediaGroup, variant: MediaVariant) {
+        val context = variant.requestContext ?: group.context
+        val message = if (variant.url == task.variant.url) "会校验原断点或分片，再继续「${task.title}」。"
+            else "将用选中的地址继续原任务「${task.title}」。地址已变化，下载会从头开始。"
+        AlertDialog.Builder(this).setTitle("恢复原下载任务？").setMessage(message)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("恢复") { _, _ ->
+                io.execute {
+                    val restored = runCatching { DownloadRepository.get(this).recover(task.id, variant, context) }.getOrDefault(false)
+                    runOnUiThread {
+                        if (isDestroyed) return@runOnUiThread
+                        if (restored) {
+                            tabs.filter { it.recovery?.id == task.id }.forEach { it.recovery = null }
+                            persistSession()
+                            selectSection(1)
+                            startDownloads()
+                        } else toast("任务状态已变化，或该资源已有下载任务，请查看下载列表")
+                    }
+                }
+            }.show()
     }
 
     private fun submitDownloads(snapshot: List<Pair<MediaGroup, MediaVariant>>) {

@@ -26,7 +26,8 @@ class MediaSheet(
     private val images: MediaImages,
     private val submit: (List<Pair<MediaGroup, MediaVariant>>) -> Unit,
     private val previewVideo: (MediaGroup, MediaVariant) -> Unit,
-    private val retry: () -> Unit
+    private val retry: () -> Unit,
+    private val recoveryTitle: String? = null
 ) {
     private val dialog = Dialog(activity)
     private val selected = linkedSetOf<String>()
@@ -65,7 +66,7 @@ class MediaSheet(
         handle.setOnClickListener { expanded = !expanded; resize() }
         body.addView(handle, LinearLayout.LayoutParams(-1, activity.dp(20)))
         val top = activity.row()
-        top.addView(activity.label("本页资源", 18f), LinearLayout.LayoutParams(0, activity.dp(48), 1f))
+        top.addView(activity.label(if (recoveryTitle == null) "本页资源" else "恢复下载", 18f), LinearLayout.LayoutParams(0, activity.dp(48), 1f))
         top.addView(BrowserIcon(activity, "reload", "重新检测") { dialog.dismiss(); retry() }, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
         top.addView(BrowserIcon(activity, "close", "关闭资源面板") { dialog.dismiss() }, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
         body.addView(top)
@@ -113,7 +114,11 @@ class MediaSheet(
     }
     fun refresh() {
         if (!session.alive) { dismiss(); return }
-        status.text = if (session.groups.isEmpty()) session.message else "选择要下载的视频版本或图片"
+        status.text = when {
+            recoveryTitle != null -> "原任务：$recoveryTitle\n" + if (session.groups.isEmpty()) session.message else "请选择一个同类型资源"
+            session.groups.isEmpty() -> session.message
+            else -> "选择要下载的视频版本或图片"
+        }
         session.groups.values.filter { !it.image }.forEach { group ->
             val row = rows.getOrPut(group.id) {
                 activity.column().apply {

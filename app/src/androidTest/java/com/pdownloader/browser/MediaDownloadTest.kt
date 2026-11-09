@@ -158,7 +158,7 @@ class MediaDownloadTest {
         assertTrue(server.requests.last { it.first == "/protected.mp4" }.second["cookie"].orEmpty().contains("fixture=yes"))
     }
     @Test fun resumeValidatesRangesAndRestartsWhenRangeIsIgnored() {
-        listOf("/sample.mp4", "/ignore-range.mp4").forEach { path ->
+        listOf("/sample.mp4", "/ignore-range.mp4", "/changed-range.mp4").forEach { path ->
             val task = enqueue(path)
             repository.folder(task.id).mkdirs()
             File(repository.folder(task.id), "transfer.part").writeBytes(sample().copyOfRange(0, 1000))
@@ -167,8 +167,38 @@ class MediaDownloadTest {
             val finished = repository.get(task.id)!!
             assertEquals(TaskState.COMPLETE, finished.state)
             assertArrayEquals(sample(), File(repository.folder(task.id), finished.output).readBytes())
-            assertEquals("bytes=1000-", server.requests.last { it.first == path }.second["range"])
+            val requests = server.requests.filter { it.first == path }
+            assertEquals("bytes=1000-", requests.first().second["range"])
+            if (path == "/changed-range.mp4") assertNull(requests.last().second["range"])
         }
+    }
+
+    @Test fun failedTasksKeepTheirIdentityAndNeverReusePartsAfterAChangedAddress() {
+        val login = enqueue("/login.mp4")
+        engine.run(login.id)
+        assertEquals(DownloadFailure.LOGIN, repository.get(login.id)?.failure)
+        val forbidden = enqueue("/protected.mp4")
+        engine.run(forbidden.id)
+        assertEquals(DownloadFailure.FORBIDDEN, repository.get(forbidden.id)?.failure)
+
+        val original = enqueue("/expired", MediaKind.HLS)
+        engine.run(original.id)
+        assertEquals(DownloadFailure.SOURCE, repository.get(original.id)?.failure)
+        val replacement = original.variant.copy(url = server.base + "/media.m3u8")
+        val folder = repository.folder(original.id)
+        val playlist = context.assets.open("media-fixture/media.m3u8").bufferedReader().use { it.readText() }
+        File(folder, "playlist.fingerprint").writeText(stableId(replacement.url + playlist))
+        File(folder, "part-0.bin").writeText("stale")
+        assertTrue(repository.recover(original.id, replacement, original.context))
+        assertFalse(repository.recover(original.id, replacement, original.context))
+        assertFalse(repository.enqueue(original.title, replacement, original.context).second)
+        engine.run(original.id)
+        val recovered = requireNotNull(repository.get(original.id))
+        assertEquals(TaskState.COMPLETE, recovered.state)
+        assertEquals(original.context.pageUrl, recovered.context.pageUrl)
+        val firstPart = HlsPlaylist.parse(playlist, replacement.url).parts.first()
+        val bytes = context.assets.open("media-fixture/" + firstPart.url.substringAfterLast('/')).use { it.readBytes() }
+        assertArrayEquals(bytes, File(folder, "part-0.bin").readBytes())
     }
     @Test fun pauseResumeAndCancelKeepTemporaryFilesConsistent() {
         val task = enqueue("/slow.mp4")

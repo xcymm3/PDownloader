@@ -42,6 +42,7 @@ class DownloadsView(
     private val activity: Activity,
     private val images: MediaImages,
     private val source: (String) -> Unit,
+    private val recover: (DownloadTask) -> Unit,
     private val online: (DownloadTask) -> Unit,
     private val open: (DownloadTask) -> Unit,
     private val export: (DownloadTask) -> Unit,
@@ -164,13 +165,13 @@ class DownloadsView(
                 else -> "${bytes(task.downloaded)} · 总大小未知"
             }
             stateRow.addView(activity.label("${task.state.label} · $details", 12f, true), LayoutParams(0, activity.dp(44), 1f))
-            if (task.state != TaskState.COMPLETE && task.state != TaskState.CANCELLED) {
+            if (task.state != TaskState.COMPLETE && task.state != TaskState.CANCELLED && task.state != TaskState.FAILED) {
                 val paused = task.state !in activeStates
                 stateRow.addView(BrowserIcon(activity, if (paused) "play" else "pause", if (paused) "继续下载" else "暂停下载") {
                     io.execute {
                         repository.update(task.id) { current ->
                             when {
-                                paused && current.state in setOf(TaskState.PAUSED, TaskState.FAILED) -> current.copy(state = TaskState.QUEUED, error = "")
+                                paused && current.state == TaskState.PAUSED -> current.copy(state = TaskState.QUEUED, error = "")
                                 !paused && current.state in activeStates -> current.copy(state = TaskState.PAUSED, error = "")
                                 else -> current
                             }
@@ -192,6 +193,19 @@ class DownloadsView(
             }
             body.addView(progress, LayoutParams(-1, activity.dp(3)))
             if (task.error.isNotEmpty()) body.addView(activity.label(task.error, 12f).apply { setPadding(0, activity.dp(8), 0, 0) })
+            if (task.state == TaskState.FAILED) {
+                val failure = task.failure ?: DownloadFailure.OTHER
+                body.addView(activity.action(failure.action) {
+                    if (failure.needsSource) recover(task)
+                    else io.execute {
+                        repository.update(task.id) { current ->
+                            if (current.state == TaskState.FAILED && current.failure?.needsSource != true)
+                                current.copy(state = TaskState.QUEUED, error = "", failure = null) else current
+                        }
+                        main.post { start() }
+                    }
+                }, LayoutParams(-1, activity.dp(48)).apply { topMargin = activity.dp(6) })
+            }
             return body
         }
     }
@@ -281,7 +295,8 @@ class DownloadsView(
     private fun updateTasks(from: Set<TaskState>, to: TaskState) {
         repository.all().filter { it.state in from }.forEach { task ->
             repository.update(task.id) { current ->
-                if (current.state in from) current.copy(state = to, error = "") else current
+                if (current.state in from && !(to == TaskState.QUEUED && current.failure?.needsSource == true))
+                    current.copy(state = to, error = "", failure = null) else current
             }
         }
     }

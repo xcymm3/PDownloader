@@ -20,6 +20,21 @@ enum class TaskState(val label: String) {
 internal val transferStates = setOf(TaskState.CONNECTING, TaskState.DOWNLOADING, TaskState.PROCESSING)
 val activeStates = transferStates + TaskState.QUEUED
 
+enum class DownloadFailure(val action: String, val needsSource: Boolean = false) {
+    NETWORK("继续下载"), LOGIN("打开原页登录", true), FORBIDDEN("打开原页", true),
+    SOURCE("回原页重新检测", true), OTHER("继续下载");
+
+    companion object {
+        internal fun legacy(message: String): DownloadFailure = when {
+            message.startsWith("服务器拒绝访问") -> FORBIDDEN
+            message.startsWith("需要登录") -> LOGIN
+            listOf("链接已过期", "重新检测", "远程文件发生变化", "分片地址返回了网页").any(message::contains) -> SOURCE
+            message.startsWith("网络") -> NETWORK
+            else -> OTHER
+        }
+    }
+}
+
 data class DownloadTask(
     val id: String,
     val title: String,
@@ -36,7 +51,9 @@ data class DownloadTask(
     val thumbnail: String = "",
     val durationMs: Long = -1,
     val saveToPublic: Boolean = false,
-    val publicUri: String = ""
+    val publicUri: String = "",
+    val failure: DownloadFailure? = null,
+    val resetPartial: Boolean = false
 )
 
 class DownloadRepository private constructor(context: Context) : SQLiteOpenHelper(context.applicationContext, "downloads.db", null, 2) {
@@ -92,6 +109,28 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
             writableDatabase.update("retained_files", ContentValues().apply { put("payload", encode(task).toString()) }, "id=?", arrayOf(id))
         }
         notifyChange()
+    }
+
+    @Synchronized internal fun recover(id: String, variant: MediaVariant, context: RequestContext): Boolean {
+        val previous = get(id) ?: return false
+        if (previous.state != TaskState.FAILED || previous.variant.kind != variant.kind ||
+            variant.blockedReason.isNotEmpty() || !webUrl(variant.url)) return false
+        val dedup = stableId(variant.id + previous.context.pageUrl)
+        if (readableDatabase.rawQuery("SELECT 1 FROM tasks WHERE dedup=? AND id!=? AND state!=? LIMIT 1",
+                arrayOf(dedup, id, TaskState.CANCELLED.name)).use { it.moveToFirst() }) return false
+        val changedUrl = previous.variant.url != variant.url
+        val task = previous.copy(
+            variant = variant.copy(requestContext = null), context = context.copy(pageUrl = previous.context.pageUrl),
+            state = TaskState.QUEUED, failure = null, error = "",
+            downloaded = if (changedUrl) 0 else previous.downloaded, total = if (changedUrl) -1 else previous.total,
+            partsDone = if (changedUrl) 0 else previous.partsDone, partsTotal = if (changedUrl) 0 else previous.partsTotal,
+            validator = if (changedUrl) "" else previous.validator, resetPartial = changedUrl || previous.resetPartial
+        )
+        val updated = writableDatabase.update("tasks", ContentValues().apply {
+            put("dedup", dedup); put("state", task.state.name); put("payload", encode(task).toString())
+        }, "id=? AND state=?", arrayOf(id, TaskState.FAILED.name))
+        if (updated == 1) notifyChange()
+        return updated == 1
     }
     @Synchronized fun recoverInterrupted() {
         all().filter { it.state in activeStates }.forEach { task -> update(task.id) { it.copy(state = TaskState.PAUSED, error = "应用或服务已停止，点击继续下载") } }
@@ -151,6 +190,7 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
             put("validator", task.validator); put("output", task.output)
             put("thumbnail", task.thumbnail); put("durationMs", task.durationMs)
             put("saveToPublic", task.saveToPublic); put("publicUri", task.publicUri)
+            put("failure", task.failure?.name); put("resetPartial", task.resetPartial)
         }
         fun decode(json: String): DownloadTask = JSONObject(json).let {
             val url = it.getString("url")
@@ -158,9 +198,13 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
             val storedKind = MediaKind.valueOf(it.getString("kind"))
             val kind = if (storedKind == MediaKind.VIDEO && specificMime(mime) != null && downloadKind(url, mime) == MediaKind.OTHER)
                 MediaKind.OTHER else storedKind
+            val state = TaskState.valueOf(it.getString("state"))
+            val error = it.optString("error")
+            val failure = if (state == TaskState.FAILED)
+                DownloadFailure.entries.find { reason -> reason.name == it.optString("failure") } ?: DownloadFailure.legacy(error) else null
             DownloadTask(it.getString("id"), it.getString("title"), MediaVariant(url, kind, it.optString("quality"), it.optInt("height"), mime = mime),
                 RequestContext(it.getString("page"), it.optString("ua"), it.optString("referer"), it.optString("credentialOrigin"), it.optString("authorization")),
-                TaskState.valueOf(it.getString("state")), it.optLong("downloaded"), it.optLong("total", -1), it.optInt("partsDone"), it.optInt("partsTotal"), it.optString("error"), it.optString("validator"), it.optString("output"), it.optString("thumbnail"), it.optLong("durationMs", -1), it.optBoolean("saveToPublic"), it.optString("publicUri"))
+                state, it.optLong("downloaded"), it.optLong("total", -1), it.optInt("partsDone"), it.optInt("partsTotal"), error, it.optString("validator"), it.optString("output"), it.optString("thumbnail"), it.optLong("durationMs", -1), it.optBoolean("saveToPublic"), it.optString("publicUri"), failure, it.optBoolean("resetPartial"))
         }
     }
 }
