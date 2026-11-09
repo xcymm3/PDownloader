@@ -1170,8 +1170,11 @@ class MainActivity : ThemedActivity() {
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = downloadMime(task)
-            val name = if (task.variant.kind == MediaKind.OTHER) task.output.ifBlank { otherFileName(task.title) }
-                else safeFileName(task.title, if (hls) "zip" else extension(task.variant))
+            val name = if (task.variant.kind == MediaKind.OTHER) {
+                task.output.ifBlank { otherFileName(task.title) }
+            } else {
+                safeFileName(task.title, if (hls) "zip" else extension(task.variant))
+            }
             putExtra(Intent.EXTRA_TITLE, name)
         }, 701)
     }
