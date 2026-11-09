@@ -31,7 +31,6 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
@@ -80,7 +79,6 @@ class MainActivity : Activity() {
     private lateinit var forwardButton: BrowserIcon
     private lateinit var refreshButton: BrowserIcon
     private val bottomIcons = mutableListOf<BrowserIcon>()
-    private val bottomLabels = mutableListOf<TextView>()
     private var section = 0
     private var fullView: View? = null
     private var fullCallback: WebChromeClient.CustomViewCallback? = null
@@ -217,16 +215,9 @@ class MainActivity : Activity() {
         chrome.addView(View(this).apply { setBackgroundColor(color(R.color.divider)) }, LinearLayout.LayoutParams(-1, dp(1)))
         val nav = row()
         listOf(Triple("home", "浏览", 0), Triple("download", "下载中", 1), Triple("done", "已下载", 2)).forEach { (kind, title, index) ->
-            val item = column().apply {
-                gravity = Gravity.CENTER; isClickable = true; isFocusable = true; contentDescription = title
-                setOnClickListener { selectSection(index) }
-            }
             val image = icon(kind, title) { selectSection(index) }
-            val text = label(title, 12f).apply { gravity = Gravity.CENTER }
-            bottomIcons.add(image); bottomLabels.add(text)
-            item.addView(image, LinearLayout.LayoutParams(dp(48), dp(36)))
-            item.addView(text, LinearLayout.LayoutParams(-1, dp(22)))
-            nav.addView(item, LinearLayout.LayoutParams(0, dp(64), 1f))
+            bottomIcons.add(image)
+            nav.addView(image, LinearLayout.LayoutParams(0, dp(52), 1f))
         }
         chrome.addView(nav)
         selectSection(0)
@@ -244,7 +235,6 @@ class MainActivity : Activity() {
         browser.visibility = if (index == 0) View.VISIBLE else View.GONE
         placeholder.visibility = if (index == 0) View.GONE else View.VISIBLE
         bottomIcons.forEachIndexed { i, icon -> icon.selectedIcon = i == index; icon.isSelected = i == index }
-        bottomLabels.forEachIndexed { i, text -> text.setTextColor(color(if (i == index) R.color.accent else R.color.muted)) }
         if (tabs.isNotEmpty()) {
             if (index == 0) current.web?.onResume() else current.web?.onPause()
         }
