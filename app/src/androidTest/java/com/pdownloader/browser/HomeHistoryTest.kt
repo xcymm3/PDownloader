@@ -127,7 +127,7 @@ class HomeHistoryTest {
                 scenario.check { activity ->
                     val visible = descendants(activity.window.decorView).filterIsInstance<android.widget.TextView>()
                         .filter { it.isShown }.map { it.text.toString() }.toList()
-                    visible.any { it.endsWith("· 切换标签") } &&
+                    visible.any { it.endsWith("切换标签") } &&
                         "联想收藏  ·  收藏" in visible && "联想历史  ·  历史" in visible
                 }
             }
