@@ -17,7 +17,10 @@ data class SeekPosition(val positionMs: Long, val durationMs: Long)
 class SeekSession(private val initial: SeekPosition) {
     val valid get() = initial.durationMs > 0
     val durationMs get() = initial.durationMs
-    fun target(distance: Float, width: Int): Long = (initial.positionMs + distance / width.coerceAtLeast(1) * minOf(initial.durationMs, 120000L)).toLong().coerceIn(0, initial.durationMs.coerceAtLeast(0))
+    // A full-width drag changes the position by the full duration, regardless of video length.
+    fun target(distance: Float, width: Int): Long =
+        (initial.positionMs + distance.toDouble() / width.coerceAtLeast(1) * initial.durationMs)
+            .toLong().coerceIn(0, initial.durationMs.coerceAtLeast(0))
 }
 
 /** Intercepts horizontal movement only; taps, vertical motion and controller buttons keep their normal handling. */
