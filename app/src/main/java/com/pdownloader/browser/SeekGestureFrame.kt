@@ -6,6 +6,9 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.Gravity
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.content.res.ColorStateList
 import kotlin.math.abs
 
 data class SeekPosition(val positionMs: Long, val durationMs: Long)
@@ -13,6 +16,7 @@ data class SeekPosition(val positionMs: Long, val durationMs: Long)
 /** The same calculation is used by native and HTML-video gestures. Unknown/live durations cannot seek. */
 class SeekSession(private val initial: SeekPosition) {
     val valid get() = initial.durationMs > 0
+    val durationMs get() = initial.durationMs
     fun target(distance: Float, width: Int): Long = (initial.positionMs + distance / width.coerceAtLeast(1) * minOf(initial.durationMs, 120000L)).toLong().coerceIn(0, initial.durationMs.coerceAtLeast(0))
 }
 
@@ -25,12 +29,29 @@ class SeekGestureFrame(context: Context, private val read: () -> SeekPosition?, 
     private var blocked = false; private var dragging = false
     private val slop = ViewConfiguration.get(context).scaledTouchSlop
     private var target = 0L
-    private val hint = context.label("", 18f).apply {
-        gravity = Gravity.CENTER; setTextColor(context.color(R.color.video_foreground)); background = context.shape(R.color.gallery_controls, 12)
-        setPadding(context.dp(20), context.dp(12), context.dp(20), context.dp(12)); visibility = View.GONE
-        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    private val time = context.label("", 22f).apply {
+        gravity = Gravity.CENTER; setTextColor(context.color(R.color.video_foreground))
+        contentDescription = "拖动定位时间"
     }
-    fun installHint() { addView(hint, LayoutParams(-2, -2, Gravity.CENTER)) }
+    private val progress = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
+        max = 1000
+        progressTintList = ColorStateList.valueOf(context.color(R.color.video_foreground))
+        progressBackgroundTintList = ColorStateList.valueOf(0x55FFFFFF)
+        contentDescription = "拖动定位进度"
+    }
+    private val hint = context.column().apply {
+        gravity = Gravity.CENTER; background = context.shape(R.color.gallery_controls, 12)
+        setPadding(context.dp(20), context.dp(12), context.dp(20), context.dp(16)); visibility = View.GONE
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        addView(time, LinearLayout.LayoutParams(-1, context.dp(40)))
+        addView(progress, LinearLayout.LayoutParams(-1, context.dp(3)))
+    }
+    fun installHint() { addView(hint, LayoutParams(context.dp(240), -2, Gravity.CENTER)) }
+    internal fun showSeekHint(targetMs: Long, durationMs: Long) {
+        time.text = "${formatMediaTime(targetMs)} / ${formatMediaTime(durationMs)}"
+        progress.progress = (targetMs.toDouble() / durationMs.coerceAtLeast(1) * 1000).toInt().coerceIn(0, 1000)
+        hint.visibility = View.VISIBLE
+    }
     override fun performClick(): Boolean = super.performClick()
     override fun onInitializeAccessibilityNodeInfo(info: android.view.accessibility.AccessibilityNodeInfo) {
         super.onInitializeAccessibilityNodeInfo(info)
@@ -59,7 +80,13 @@ class SeekGestureFrame(context: Context, private val read: () -> SeekPosition?, 
                 if (!blocked && session != null) {
                     val dx = abs(event.x - downX); val dy = abs(event.y - downY)
                     if (dy > slop && dy > dx) blocked = true
-                    if (dx > slop && dx > dy * 1.25f) { dragging = true; parent?.requestDisallowInterceptTouchEvent(true); return true }
+                    if (dx > slop && dx > dy * 1.25f) {
+                        dragging = true
+                        target = session!!.target(event.x - downX, width)
+                        showSeekHint(target, session!!.durationMs)
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        return true
+                    }
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> finish(false)
@@ -73,8 +100,7 @@ class SeekGestureFrame(context: Context, private val read: () -> SeekPosition?, 
         when (event.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
                 target = session?.target(event.x - downX, width) ?: return true
-                hint.text = context.getString(R.string.gesture_seek_time, formatMediaTime(target))
-                hint.visibility = View.VISIBLE
+                showSeekHint(target, session!!.durationMs)
             }
             MotionEvent.ACTION_UP -> { target = session?.target(event.x - downX, width) ?: target; finish(true) }
             MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> finish(false)

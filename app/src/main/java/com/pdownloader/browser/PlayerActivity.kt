@@ -14,6 +14,9 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.Toast
+import android.widget.TextView
+import android.os.Handler
+import android.os.Looper
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -37,7 +40,14 @@ class PlayerActivity : ThemedActivity() {
     private var play = true
     private var task: com.pdownloader.browser.download.DownloadTask? = null
     private lateinit var header: LinearLayout
-    private lateinit var footer: View
+    private lateinit var title: TextView
+    private val memory by lazy { PlaybackMemory(this) }
+    private var playlist = emptyList<com.pdownloader.browser.download.DownloadTask>()
+    private val navigation = mutableListOf<Pair<View, Boolean>>()
+    private val main = Handler(Looper.getMainLooper())
+    private val remember = object : Runnable {
+        override fun run() { savePosition(); main.postDelayed(this, 5000) }
+    }
     private var previousOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     private var fullscreen = false
     private var backgroundPaused = false
@@ -48,11 +58,20 @@ class PlayerActivity : ThemedActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        position = savedInstanceState?.getLong("position") ?: 0
         play = savedInstanceState?.getBoolean("playing", true) ?: true
-        task = intent.getStringExtra("task")?.let { DownloadRepository.get(this).get(it) }
-            ?: intent.getStringExtra("preview")?.let { runCatching { DownloadRepository.decode(it) }.getOrNull() }
+        task = (savedInstanceState?.getString("task") ?: intent.getStringExtra("task"))?.let { DownloadRepository.get(this).get(it) }
+            ?: (savedInstanceState?.getString("preview") ?: intent.getStringExtra("preview"))?.let { runCatching { DownloadRepository.decode(it) }.getOrNull() }
         if (task == null) { finish(); return }
+        position = savedInstanceState?.getLong("position") ?: memory.read(task!!)
+        if (task!!.state == TaskState.COMPLETE) {
+            playlist = DownloadRepository.get(this).all().filter { it.state == TaskState.COMPLETE && it.variant.kind.isVideo }
+        } else {
+            playlist = runCatching {
+                val items = org.json.JSONArray(intent.getStringExtra("previewQueue") ?: "[]")
+                (0 until minOf(items.length(), 40)).map { DownloadRepository.decode(items.getJSONObject(it).toString()) }
+                    .filter { it.variant.kind.isVideo && it.variant.blockedReason.isEmpty() }
+            }.getOrDefault(emptyList())
+        }
         val layout = column().apply { setBackgroundColor(color(R.color.video_background)) }
         @Suppress("DEPRECATION")
         window.statusBarColor = color(R.color.video_background)
@@ -73,7 +92,14 @@ class PlayerActivity : ThemedActivity() {
         }
         header = row().apply { contentDescription = "播放器标题栏" }
         header.addView(BrowserIcon(this, "back", "返回浏览器") { finish() }.apply { foregroundColor = color(R.color.video_foreground) }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        header.addView(label(task!!.title, 15f).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setTextColor(color(R.color.video_foreground)) }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        title = label(task!!.title, 15f).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setTextColor(color(R.color.video_foreground)) }
+        header.addView(title, LinearLayout.LayoutParams(0, dp(52), 1f))
+        listOf(false, true).forEach { next ->
+            val button = BrowserIcon(this, if (next) "next_video" else "previous_video", if (next) "下一个视频" else "上一个视频") { switchVideo(next) }
+                .apply { foregroundColor = color(R.color.video_foreground) }
+            navigation.add(button to next)
+            header.addView(button, LinearLayout.LayoutParams(dp(48), dp(48)))
+        }
         layout.addView(header)
         if (task!!.state != TaskState.COMPLETE) header.addView(BrowserIcon(this, "external", "打开来源网页") {
             startActivity(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_VIEW).setData(Uri.parse(task!!.context.pageUrl))); finish()
@@ -81,6 +107,12 @@ class PlayerActivity : ThemedActivity() {
         playerView = (layoutInflater.inflate(R.layout.browser_player_view, layout, false) as PlayerView).apply {
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING); setKeepContentOnPlayerReset(true)
         }
+        listOf(R.id.player_previous to false, R.id.player_next to true).forEach { (id, next) ->
+            val button = playerView.findViewById<View>(id)
+            button.setOnClickListener { switchVideo(next) }
+            navigation.add(button to next)
+        }
+        updateNavigation()
         val gestures = SeekGestureFrame(this, read = { player?.takeIf { canSeek }?.let { SeekPosition(it.currentPosition, it.duration) } }, commit = { seekToPosition(it) })
         gestures.addView(playerView, android.widget.FrameLayout.LayoutParams(-1, -1))
         gestures.installHint()
@@ -90,8 +122,6 @@ class PlayerActivity : ThemedActivity() {
             controls?.isShown == true && controls.getGlobalVisibleRect(rect) && rect.contains(x.toInt(), y.toInt())
         }
         layout.addView(gestures, LinearLayout.LayoutParams(-1, 0, 1f))
-        footer = label(if (task!!.state == TaskState.COMPLETE) "离线播放" else "在线播放", 12f).apply { gravity = Gravity.CENTER; setTextColor(color(R.color.video_foreground)); alpha = .65f }
-        layout.addView(footer, LinearLayout.LayoutParams(-1, dp(24)))
         setContentView(layout)
         playerView.setFullscreenButtonClickListener { setPlayerFullscreen(it) }
         playerView.findViewById<DefaultTimeBar>(androidx.media3.ui.R.id.exo_progress)?.addListener(object : TimeBar.OnScrubListener {
@@ -105,6 +135,11 @@ class PlayerActivity : ThemedActivity() {
     override fun onStart() {
         super.onStart()
         backgroundPaused = false
+        startPlayer()
+        main.post(remember)
+    }
+
+    private fun startPlayer() {
         val selected = task ?: return
         val local = selected.state == TaskState.COMPLETE
         val uri = if (local) {
@@ -122,6 +157,9 @@ class PlayerActivity : ThemedActivity() {
             if (selected.variant.kind == MediaKind.HLS) item.setMimeType(MimeTypes.APPLICATION_M3U8)
             engine.setMediaItem(item.build()); engine.seekTo(position)
             engine.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_ENDED) memory.save(selected, 0)
+                }
                 override fun onPlayerError(error: PlaybackException) {
                     Toast.makeText(this@PlayerActivity, if (local) "本地视频无法播放，可能为不支持的编码或文件已损坏" else "在线预览失败，请返回来源网页播放", Toast.LENGTH_LONG).show()
                 }
@@ -136,11 +174,62 @@ class PlayerActivity : ThemedActivity() {
         val target = positionMs.coerceIn(0, engine.duration)
         if (kotlin.math.abs(engine.currentPosition - target) > 20) engine.seekTo(target)
         position = target
+        task?.let { memory.save(it, target) }
         return true
     }
-    override fun onPause() { player?.let { play = it.playWhenReady; it.pause() }; backgroundPaused = true; super.onPause() }
+    private fun savePosition() {
+        val selected = task ?: return
+        val engine = player ?: return
+        position = if (engine.playbackState == Player.STATE_ENDED) 0 else engine.currentPosition
+        memory.save(selected, position)
+    }
+
+    private fun updateNavigation() {
+        val index = playlist.indexOfFirst { it.id == task?.id }
+        navigation.forEach { (button, next) ->
+            button.isEnabled = index >= 0 && (index + if (next) 1 else -1) in playlist.indices
+            button.alpha = if (button.isEnabled) 1f else .35f
+        }
+    }
+
+    internal fun switchVideo(next: Boolean) {
+        val index = playlist.indexOfFirst { it.id == task?.id }
+        val selected = playlist.getOrNull(index + if (next) 1 else -1)?.takeIf { index >= 0 } ?: return
+        savePosition()
+        playerView.player = null
+        player?.release()
+        player = null
+        task = selected
+        position = memory.read(selected)
+        play = true
+        title.text = selected.title
+        updateNavigation()
+        startPlayer()
+    }
+
+    override fun onPause() {
+        savePosition()
+        main.removeCallbacks(remember)
+        player?.let { play = it.playWhenReady; it.pause() }
+        backgroundPaused = true
+        super.onPause()
+    }
+    override fun onResume() {
+        super.onResume()
+        if (backgroundPaused) {
+            backgroundPaused = false
+            player?.playWhenReady = play
+        }
+        main.removeCallbacks(remember)
+        main.post(remember)
+    }
     override fun onSaveInstanceState(outState: Bundle) {
-        outState.putLong("position", player?.currentPosition ?: position); outState.putBoolean("fullscreen", fullscreen)
+        val savedPosition = if (player?.playbackState == Player.STATE_ENDED) 0 else player?.currentPosition ?: position
+        outState.putLong("position", savedPosition); outState.putBoolean("fullscreen", fullscreen)
+        task?.let { selected ->
+            if (selected.state == TaskState.COMPLETE) outState.putString("task", selected.id)
+            else outState.putString("preview", DownloadRepository.encode(selected).toString())
+        }
         outState.putBoolean("playing", if (backgroundPaused) play else player?.playWhenReady ?: play)
         super.onSaveInstanceState(outState)
     }
@@ -150,7 +239,7 @@ class PlayerActivity : ThemedActivity() {
         fullscreen = value
         requestedOrientation = if (value) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else previousOrientation
         header.visibility = if (value) View.GONE else View.VISIBLE
-        footer.visibility = if (value) View.GONE else View.VISIBLE
+        playerView.findViewById<View>(R.id.player_video_navigation).visibility = if (value) View.VISIBLE else View.GONE
         playerView.setFullscreenButtonState(value)
         if (Build.VERSION.SDK_INT >= 30) window.insetsController?.apply {
             if (value) { hide(WindowInsets.Type.systemBars()); systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE }
@@ -161,7 +250,9 @@ class PlayerActivity : ThemedActivity() {
     @Deprecated("Handled by the platform back dispatcher on Android 13+")
     override fun onBackPressed() { if (fullscreen) setPlayerFullscreen(false) else finish() }
     override fun onStop() {
-        player?.let { position = it.currentPosition; playerView.player = null; it.release() }; player = null
+        main.removeCallbacks(remember)
+        savePosition()
+        player?.let { playerView.player = null; it.release() }; player = null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         super.onStop()
     }

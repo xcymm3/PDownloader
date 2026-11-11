@@ -83,6 +83,8 @@ internal class BrowserIcon @JvmOverloads constructor(context: Context, private v
             "image" -> { canvas.drawRoundRect(3f, 3f, 21f, 21f, 2f, 2f, paint); canvas.drawCircle(8f, 8f, 1.5f, paint); line(4f, 18f, 10f, 12f, 14f, 16f, 17f, 12f, 21f, 17f) }
             "file" -> { line(6f, 3f, 14f, 3f, 19f, 8f, 19f, 21f, 6f, 21f, 6f, 3f); line(14f, 3f, 14f, 8f, 19f, 8f); line(9f, 13f, 16f, 13f); line(9f, 17f, 16f, 17f) }
             "play" -> line(8f, 4f, 20f, 12f, 8f, 20f, 8f, 4f)
+            "previous_video" -> { line(5f, 5f, 5f, 19f); line(19f, 5f, 8f, 12f, 19f, 19f, 19f, 5f) }
+            "next_video" -> { line(19f, 5f, 19f, 19f); line(5f, 5f, 16f, 12f, 5f, 19f, 5f, 5f) }
             "pause" -> { line(8f, 5f, 8f, 19f); line(16f, 5f, 16f, 19f) }
             "edit" -> { line(4f, 16f, 16f, 4f, 20f, 8f, 8f, 20f, 3f, 21f, 4f, 16f); line(13f, 7f, 17f, 11f) }
             "select_all" -> { canvas.drawRoundRect(3f, 3f, 21f, 21f, 2f, 2f, paint); line(7f, 12f, 10f, 15f, 17f, 8f) }

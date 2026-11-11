@@ -1,5 +1,16 @@
 <merge xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
+    <LinearLayout android:id="@+id/player_video_navigation"
+        android:layout_width="wrap_content" android:layout_height="48dp"
+        android:layout_gravity="top|end" android:orientation="horizontal"
+        android:background="@drawable/player_controls_scrim">
+        <ImageButton android:id="@+id/player_previous" android:layout_width="48dp" android:layout_height="48dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless" android:padding="12dp"
+            android:src="@drawable/player_previous" android:contentDescription="上一个视频" />
+        <ImageButton android:id="@+id/player_next" android:layout_width="48dp" android:layout_height="48dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless" android:padding="12dp"
+            android:src="@drawable/player_next" android:contentDescription="下一个视频" />
+    </LinearLayout>
     <LinearLayout android:id="@id/exo_bottom_bar" android:layout_width="match_parent"
         android:layout_height="wrap_content" android:layout_gravity="bottom"
         android:orientation="vertical" android:paddingStart="12dp" android:paddingEnd="12dp"

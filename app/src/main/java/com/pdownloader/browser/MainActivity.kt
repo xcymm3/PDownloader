@@ -919,7 +919,11 @@ class MainActivity : ThemedActivity() {
                 else confirmRecovery(recovery, item.first, item.second)
             }
         }, previewVideo = { group, variant ->
-            previewTask(DownloadTask(java.util.UUID.randomUUID().toString(), group.title, variant, variant.requestContext ?: group.context))
+            val queue = session.groups.values.filter { !it.image }.mapNotNull { item ->
+                val choice = if (item.id == group.id) variant else item.variants.firstOrNull { it.kind.isVideo && it.blockedReason.isEmpty() }
+                choice?.let { DownloadTask(item.id, item.title, it, it.requestContext ?: item.context) }
+            }
+            previewTask(DownloadTask(group.id, group.title, variant, variant.requestContext ?: group.context), queue)
         }, retry = retry, recoveryTitle = recovery?.title, shared = shared).also { it.show(imagesFirst) }
     }
 
@@ -1076,9 +1080,20 @@ class MainActivity : ThemedActivity() {
             }
         }
     }
-    private fun previewTask(task: DownloadTask) {
+    private fun previewTask(task: DownloadTask, queue: List<DownloadTask> = listOf(task)) {
         if (task.variant.blockedReason.isNotEmpty()) { toast(task.variant.blockedReason); return }
-        startActivity(Intent(this, PlayerActivity::class.java).putExtra("preview", DownloadRepository.encode(task).toString()))
+        val previews = JSONArray()
+        val start = (queue.indexOfFirst { it.id == task.id } - 20).coerceAtLeast(0)
+        var payloadSize = 0
+        queue.drop(start).take(40).forEach {
+            val data = DownloadRepository.encode(it)
+            val size = data.toString().length
+            if (it.id == task.id || payloadSize + size < 120000) {
+                previews.put(data); payloadSize += size
+            }
+        }
+        startActivity(Intent(this, PlayerActivity::class.java).putExtra("preview", DownloadRepository.encode(task).toString())
+            .putExtra("previewQueue", previews.toString()))
     }
     private fun openDownloaded(task: DownloadTask) {
         if (task.variant.kind == MediaKind.OTHER) {
