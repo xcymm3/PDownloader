@@ -83,7 +83,11 @@ class BrowserRefreshTest {
                 assertTrue(texts.contains("收藏夹"))
                 assertTrue(texts.containsAll(listOf("设置", "关于")))
                 assertTrue(texts.none { it in listOf("在网页中查找", "下载内容", "所有标签页", "帮助") })
-                listOf("后退", "前进", "刷新网页", "收藏当前网页").forEach { label -> assertTrue(descendants(menu).any { it.contentDescription == label }) }
+                listOf("前进", "刷新网页", "收藏当前网页").forEach { label -> assertTrue(descendants(menu).any { it.contentDescription == label }) }
+                val top = (menu as ViewGroup).getChildAt(0) as ViewGroup
+                assertEquals(3, top.childCount)
+                assertTrue(texts.contains("分享网页"))
+                assertFalse(descendants(menu).any { it.contentDescription == "后退" })
             }
             capture("browser-menu")
             scenario.onActivity { it.selectSection(0) }
@@ -133,12 +137,16 @@ class BrowserRefreshTest {
                     assertTrue(texts.any { it.contains("同时下载数") })
                     assertTrue(texts.any { it.contains("网站权限") })
                     assertTrue(texts.any { it.contains("清除 Cookie") })
+                    val selector = descendants(activity.window.decorView).filterIsInstance<android.widget.Spinner>().single()
+                    assertEquals((1..8).map(Int::toString), (0 until selector.adapter.count).map { selector.adapter.getItem(it).toString() })
                 }
+                capture("settings-dark")
                 preferences.edit().putString("theme", "LIGHT").apply()
                 scenario.recreate()
                 scenario.onActivity { activity ->
                     assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, activity.resources.configuration.uiMode and mask)
                 }
+                capture("settings-light")
             }
         } finally {
             preferences.edit().putString("theme", previous).apply()

@@ -67,7 +67,7 @@ class DownloadsView(
     private val heading = activity.label(if (completedPage) "已下载" else "下载中", 25f)
     private val bulk = activity.row()
     private val downloadSettings = DownloadSettings(activity)
-    private val parallelSetting = if (completedPage) null else activity.action(parallelDownloadLabel()) {}
+    private val parallelSetting = if (completedPage) null else activity.downloadLimitSelector(downloadSettings)
     private val filters = activity.row()
     private val empty = activity.label("暂无下载任务", 16f, true).apply { gravity = Gravity.CENTER }
     private val list = ListView(activity)
@@ -235,8 +235,8 @@ class DownloadsView(
         }
         addView(search, LayoutParams(-1, activity.dp(48)).apply { setMargins(activity.dp(16), activity.dp(8), activity.dp(16), activity.dp(8)) })
         parallelSetting?.let { setting ->
-            setting.setOnClickListener { activity.chooseDownloadLimit(downloadSettings) { refreshDownloadLimit() } }
-            bulk.addView(setting, LayoutParams(0, activity.dp(48), 1f).apply { marginStart = activity.dp(16) })
+            bulk.addView(activity.label("同时下载数", 14f), LayoutParams(0, activity.dp(48), 1f).apply { marginStart = activity.dp(16) })
+            bulk.addView(setting, LayoutParams(activity.dp(80), activity.dp(48)))
         }
         bulk.addView(BrowserIcon(activity, "pause", "暂停全部下载") {
             io.execute { updateTasks(activeStates, TaskState.PAUSED) }
@@ -283,12 +283,10 @@ class DownloadsView(
         if (dirty) refresh(force = true)
     }
     fun hide() { visiblePage = false }
-    private fun parallelDownloadLabel() = activity.getString(R.string.parallel_download_limit, downloadSettings.parallelDownloads)
-
     internal fun refreshDownloadLimit() {
         parallelSetting?.let { setting ->
-            val label = parallelDownloadLabel()
-            if (setting.text != label) setting.text = label
+            val index = downloadSettings.parallelDownloads - 1
+            if (setting.selectedItemPosition != index) setting.setSelection(index)
         }
     }
 

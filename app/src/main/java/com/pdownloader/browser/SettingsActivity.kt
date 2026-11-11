@@ -10,6 +10,15 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.Toast
+import android.widget.Spinner
+import android.widget.ArrayAdapter
+import android.widget.AdapterView
+import android.widget.TextView
+import android.view.View
+import android.view.ViewGroup
+import android.view.Gravity
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -74,55 +83,64 @@ class SettingsActivity : ThemedActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val settings = DownloadSettings(this)
-        val root = column().apply { setBackgroundColor(color(R.color.surface)) }
-        val heading = row()
+        val root = column().apply { setBackgroundColor(color(R.color.surface_secondary)) }
+        val heading = row().apply { setPadding(dp(8), dp(8), dp(16), dp(8)) }
         heading.addView(BrowserIcon(this, "back", "返回") { finish() }, LinearLayout.LayoutParams(dp(48), dp(52)))
         heading.addView(label("设置", 21f), LinearLayout.LayoutParams(0, dp(52), 1f))
         root.addView(heading)
-        val body = column().apply { setPadding(dp(16), dp(8), dp(16), dp(24)) }
+        val body = column().apply { setPadding(dp(16), dp(4), dp(16), dp(32)) }
         val scroll = ScrollView(this).apply { addView(body) }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        var group = column()
         fun section(title: String) {
-            body.addView(label(title, 13f, true).apply { setPadding(dp(16), dp(16), 0, 0) }, LinearLayout.LayoutParams(-1, dp(44)))
+            body.addView(label(title, 13f).apply {
+                setTextColor(color(R.color.accent))
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(dp(8), dp(20), 0, dp(8))
+            }, LinearLayout.LayoutParams(-1, -2))
+            group = column().apply { background = shape(R.color.surface, 18); clipToOutline = true }
+            body.addView(group, LinearLayout.LayoutParams(-1, -2))
         }
-        fun option(title: String, value: String, run: () -> Unit) = action("$title    $value", run).apply {
-            gravity = android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL
-            body.addView(this, LinearLayout.LayoutParams(-1, dp(52)))
+        fun option(title: String, value: String, glyph: String, run: () -> Unit): SettingsOption {
+            val entry = SettingsOption(this, title, value, glyph, run)
+            group.addView(entry, LinearLayout.LayoutParams(-1, -2))
+            return entry
         }
         fun toggle(title: String, checked: Boolean, set: (Boolean) -> Unit) {
-            body.addView(Switch(this).apply {
+            group.addView(Switch(this).apply {
                 text = title
-                textSize = 14f
+                textSize = 15f
                 setTextColor(color(R.color.ink))
                 setPadding(dp(16), 0, dp(16), 0)
                 isChecked = checked
                 setOnCheckedChangeListener { _, value -> set(value) }
-            }, LinearLayout.LayoutParams(-1, dp(52)))
+                minHeight = dp(64)
+            }, LinearLayout.LayoutParams(-1, -2))
         }
         section("外观")
-        option("主题", themeName(), ::chooseTheme)
+        option("主题", themeName(), "settings", ::chooseTheme)
         section("下载")
         val locations = arrayOf("公共下载目录", "应用私有目录")
-        val location = option("下载到", locations[if (settings.saveToPublic) 0 else 1]) {}
+        val location = option("下载到", locations[if (settings.saveToPublic) 0 else 1], "download") {}
         location.setOnClickListener {
             AlertDialog.Builder(this).setTitle("下载到")
                 .setSingleChoiceItems(locations, if (settings.saveToPublic) 0 else 1) { dialog, index ->
                     settings.saveToPublic = index == 0
-                    location.text = "下载到    ${locations[index]}"
+                    location.value.text = locations[index]
                     dialog.dismiss()
                 }.setNegativeButton(android.R.string.cancel, null).show()
         }
-        val parallel = option("同时下载数", settings.parallelDownloads.toString()) {}
-        parallel.setOnClickListener {
-            chooseDownloadLimit(settings) { parallel.text = "同时下载数    $it" }
-        }
+        val parallel = row().apply { setPadding(dp(16), dp(4), dp(16), dp(4)) }
+        parallel.addView(label("同时下载数", 16f), LinearLayout.LayoutParams(0, dp(56), 1f))
+        parallel.addView(downloadLimitSelector(settings), LinearLayout.LayoutParams(dp(80), dp(48)))
+        group.addView(parallel)
         toggle("下载完成通知", settings.notifyCompletion) { settings.notifyCompletion = it }
         toggle("按流量计费网络下添加任务前提醒", settings.warnOnMetered) { settings.warnOnMetered = it }
         section("隐私和网站")
-        option("网站权限", "", ::showSitePermissions)
-        option("清除 Cookie", "", ::confirmClearCookies)
+        option("网站权限", "摄像头、麦克风和定位", "globe", ::showSitePermissions)
+        option("清除 Cookie", "清除网站登录状态", "delete", ::confirmClearCookies)
         section("版本更新")
-        option("检查更新", "当前版本 ${BuildConfig.VERSION_NAME}", updates::check)
+        option("检查更新", "当前版本 ${BuildConfig.VERSION_NAME}", "reload", updates::check)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val light = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK != Configuration.UI_MODE_NIGHT_YES
@@ -166,12 +184,50 @@ class SettingsActivity : ThemedActivity() {
     }
 }
 
-internal fun Activity.chooseDownloadLimit(settings: DownloadSettings, onChanged: (Int) -> Unit) {
-    val options = (1..DownloadSettings.MAX_PARALLEL_DOWNLOADS).map { getString(R.string.parallel_download_limit, it) }
-    AlertDialog.Builder(this).setTitle(R.string.parallel_download_title)
-        .setSingleChoiceItems(options.toTypedArray(), settings.parallelDownloads - 1) { dialog, index ->
-            settings.parallelDownloads = index + 1
-            onChanged(index + 1)
-            dialog.dismiss()
-        }.setNegativeButton(android.R.string.cancel, null).show()
+internal fun Activity.downloadLimitSelector(settings: DownloadSettings): Spinner = Spinner(this).apply {
+    contentDescription = "同时下载数"
+    background = shape(R.color.surface_secondary, 12)
+    adapter = object : ArrayAdapter<String>(this@downloadLimitSelector, android.R.layout.simple_spinner_dropdown_item,
+        (1..DownloadSettings.MAX_PARALLEL_DOWNLOADS).map(Int::toString)) {
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+            super.getView(position, convertView, parent).also { style(it); (it as TextView).text = "${position + 1} ▾" }
+        override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
+            super.getDropDownView(position, convertView, parent).also { style(it) }
+        private fun style(view: View) {
+            (view as TextView).apply { setTextColor(color(R.color.ink)); textSize = 16f; gravity = Gravity.CENTER; minHeight = dp(48) }
+        }
+    }
+    setSelection(settings.parallelDownloads - 1)
+    onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+        override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+            settings.parallelDownloads = position + 1
+        }
+    }
+}
+
+private class SettingsOption(
+    context: Context, title: String, summary: String, glyph: String, action: () -> Unit
+) : LinearLayout(context) {
+    val value = context.label(summary, 13f, true).apply { visibility = if (summary.isEmpty()) View.GONE else View.VISIBLE }
+    init {
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = context.dp(76)
+        setPadding(context.dp(12), context.dp(12), context.dp(12), context.dp(12))
+        isClickable = true; isFocusable = true
+        foreground = RippleDrawable(ColorStateList.valueOf(context.color(R.color.accent_surface)), null, context.shape(R.color.surface))
+        setOnClickListener { action() }
+        addView(BrowserIcon(context, glyph, "").apply {
+            isClickable = false; isFocusable = false; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            foregroundColor = context.color(R.color.accent); background = null
+        }, LayoutParams(context.dp(44), context.dp(48)))
+        val words = context.column()
+        words.addView(context.label(title, 16f))
+        words.addView(value, LayoutParams(-1, -2).apply { topMargin = context.dp(5) })
+        addView(words, LayoutParams(0, -2, 1f))
+        addView(BrowserIcon(context, "forward", "").apply {
+            isClickable = false; isFocusable = false; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            foregroundColor = context.color(R.color.muted); background = null; glyphSizeDp = 16
+        }, LayoutParams(context.dp(28), context.dp(32)))
+    }
 }
