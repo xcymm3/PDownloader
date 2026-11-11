@@ -4,8 +4,8 @@ import resvg_py
 
 folder = Path('docs/design/bottom-navigation')
 icons = {
-    'browse': '<circle cx="12" cy="12" r="8.75"/><path d="M15.8 8.2 13.4 13.4 8.2 15.8 10.6 10.6Z"/>',
-    'downloading': '<path d="M20.55 10.15A8.75 8.75 0 1 1 15.25 3.88"/><path d="M12 7.5v9m-3.5-3.5 3.5 3.5 3.5-3.5"/><circle cx="19.05" cy="5.25" r=".95" fill="currentColor" stroke="none"/>',
+    'browse': '<circle cx="12" cy="12" r="8.75"/><ellipse cx="12" cy="12" rx="4" ry="8.75"/><path d="M3.25 12h17.5"/>',
+    'downloading': '<circle cx="12" cy="12" r="8.75"/><path d="M12 7.5v9m-3.5-3.5 3.5 3.5 3.5-3.5"/>',
     'downloaded': '<path d="M3.25 8V6.75a2 2 0 0 1 2-2h3.3a2 2 0 0 1 1.42.59l1.07 1.07a2 2 0 0 0 1.42.59h6.29a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5.25a2 2 0 0 1-2-2V8Z"/><path d="m8.25 13.4 2.6 2.6 4.9-4.9"/>',
 }
 for name, body in icons.items():
@@ -20,9 +20,9 @@ def icon(name, x, y, size, color):
     parts.append(f'<g transform="translate({x} {y}) scale({size/24})" fill="none" color="{color}" stroke="{color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{icons[name]}</g>')
 text(56, 75, 'PDownloader', 38, weight=600)
 text(56, 115, '底部导航 · SVG 图标方案', 21, '#707176')
-text(1144, 76, '设计预览  /  01', 15, '#818286', anchor='end')
+text(1144, 76, '设计预览  /  02', 15, '#818286', anchor='end')
 parts.append('<path d="M56 149H1144" stroke="#DDDEDA"/>')
-for x, name, label, meaning in [(238,'browse','浏览','罗盘 · 探索网页'),(600,'downloading','下载中','进度环 · 下载箭头'),(962,'downloaded','已下载','文件夹 · 完成勾选')]:
+for x, name, label, meaning in [(238,'browse','浏览','地球 · 经纬线'),(600,'downloading','下载中','闭合圆环 · 下载箭头'),(962,'downloaded','已下载','文件夹 · 完成勾选')]:
     icon(name, x-60, 211, 120, '#34363A')
     text(x, 379, label, 24, weight=500, anchor='middle')
     text(x, 411, meaning, 16, '#808186', anchor='middle')

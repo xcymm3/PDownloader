@@ -2,8 +2,8 @@
 
 此目录仅保存设计稿，尚未替换 Android 应用图标。
 
-- `browse.svg`：罗盘，代表浏览网页。
-- `downloading.svg`：环形进度与向下箭头，代表下载中。
+- `browse.svg`：地球经纬线，代表浏览网页。
+- `downloading.svg`：闭合圆环与向下箭头，代表下载中。
 - `downloaded.svg`：带勾选的文件夹，代表已下载。
 - `preview.svg` / `preview.png`：浅色、深色主题下的三种选中状态预览。实际底栏仅显示图标。
 
