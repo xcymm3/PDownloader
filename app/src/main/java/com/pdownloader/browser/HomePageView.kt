@@ -29,7 +29,7 @@ class HomePageView(
 ) : ScrollView(activity) {
     internal val sites = listOf(
         HomeSite("百度", "https://www.baidu.com/", "baidu"),
-        HomeSite("Google", "https://www.google.com/", "google"),
+        HomeSite("Google", "https://www.google.com.hk/", "google"),
         HomeSite("哔哩哔哩", "https://www.bilibili.com/", "bilibili"),
         HomeSite("YouTube", "https://www.youtube.com/", "youtube"),
         HomeSite("X", "https://x.com/", "x"),

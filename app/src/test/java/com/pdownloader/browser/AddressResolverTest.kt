@@ -12,9 +12,9 @@ class AddressResolverTest {
         assertEquals("https://[::1]:8080", AddressResolver.resolve("[::1]:8080"))
     }
     @Test fun encodesSearchQueriesWithoutChangingTheirMeaning() {
-        assertEquals("https://www.google.com/search?q=Kotlin+%E6%B5%8F%E8%A7%88%E5%99%A8", AddressResolver.resolve("Kotlin 浏览器"))
-        assertEquals("https://www.google.com/search?q=a%26b+%2B+c%23", AddressResolver.resolve("a&b + c#"))
-        assertEquals("https://www.google.com/search?q=hello", AddressResolver.resolve("hello"))
+        assertEquals("https://www.google.com.hk/search?q=Kotlin+%E6%B5%8F%E8%A7%88%E5%99%A8", AddressResolver.resolve("Kotlin 浏览器"))
+        assertEquals("https://www.google.com.hk/search?q=a%26b+%2B+c%23", AddressResolver.resolve("a&b + c#"))
+        assertEquals("https://www.google.com.hk/search?q=hello", AddressResolver.resolve("hello"))
     }
     @Test fun rejectsExecutableLocalAndMalformedUrls() {
         listOf("javascript:alert(1)", "data:text/html,test", "file:///sdcard/test.html", "content://private", "intent://app", "https://", "https://example.com/a b", "https://user:password@example.com").forEach {

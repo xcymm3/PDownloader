@@ -17,7 +17,7 @@ object AddressResolver {
         val hostAndPort = Regex("^(localhost|[\\p{L}\\p{N}.-]+\\.[\\p{L}\\p{N}-]+|\\[[0-9a-fA-F:]+])(:[0-9]{1,5})?$")
         if (!value.any(Char::isWhitespace) && hostAndPort.matches(host)) return "https://$value"
         if (hasScheme) return null
-        return "https://www.google.com/search?q=" + URLEncoder.encode(value, "UTF-8")
+        return "https://www.google.com.hk/search?q=" + URLEncoder.encode(value, "UTF-8")
     }
 
     fun isWebUrl(url: String): Boolean =
