@@ -30,7 +30,7 @@ internal class BrowserMenu(private val activity: Activity, shortcuts: List<MenuA
         }
         val scroll = ScrollView(activity).apply { addView(body) }
         content = body
-        popup = PopupWindow(scroll, minOf(activity.dp(248), activity.resources.displayMetrics.widthPixels - activity.dp(16)), -2, true).apply {
+        popup = PopupWindow(scroll, minOf(activity.dp(204), activity.resources.displayMetrics.widthPixels - activity.dp(16)), -2, true).apply {
             setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT)); elevation = activity.dp(12).toFloat(); isOutsideTouchable = true
         }
     }

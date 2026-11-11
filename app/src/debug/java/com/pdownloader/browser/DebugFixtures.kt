@@ -50,6 +50,10 @@ class FixtureServer(private val context: Context) : Closeable {
         var extra = "ETag: \"fixture-v1\"\r\nAccept-Ranges: bytes\r\n"
         val body = when {
             path == "/" -> { mime = "text/html; charset=utf-8"; page().toByteArray() }
+            path in setOf("/nav-one", "/nav-two") -> {
+                mime = "text/html"
+                "<!doctype html><title>$path</title><p>$path</p>".toByteArray()
+            }
             path == "/frame" -> { mime = "text/html"; "<video preload=\"none\" controls src=\"$base/sample.mp4?frame=1\"></video>".toByteArray() }
             path == "/nested-opaque" -> {
                 mime = "text/html"

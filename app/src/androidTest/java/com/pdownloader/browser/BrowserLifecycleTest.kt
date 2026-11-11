@@ -59,6 +59,40 @@ class BrowserLifecycleTest {
         }
     }
 
+    @Test fun backRestoresThePreviousPageAfterActivityRecreationAndReturnsToTheOpener() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        FixtureServer(context).use { server ->
+            val first = server.base + "/nav-one"
+            val second = server.base + "/nav-two"
+            ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java).apply {
+                action = Intent.ACTION_VIEW; data = Uri.parse(first)
+            }).use { scenario ->
+                fun web(activity: MainActivity) = descendants(activity.window.decorView).filterIsInstance<WebView>().single { it.isShown }
+                fun awaitPage(url: String) {
+                    val deadline = System.currentTimeMillis() + 20000
+                    while (System.currentTimeMillis() < deadline) {
+                        var loaded = false
+                        scenario.onActivity { loaded = web(it).url == url && web(it).progress == 100 }
+                        if (loaded) return
+                        Thread.sleep(100)
+                    }
+                    fail("Page did not finish loading")
+                }
+                awaitPage(first)
+                scenario.onActivity { web(it).loadUrl(second) }
+                awaitPage(second)
+                scenario.recreate()
+                awaitPage(second)
+                scenario.onActivity { assertTrue(web(it).canGoBack()); it.goBack() }
+                awaitPage(first)
+                scenario.onActivity { it.openNewTab(second) }
+                awaitPage(second)
+                scenario.onActivity { assertFalse(web(it).canGoBack()); it.goBack() }
+                awaitPage(first)
+            }
+        }
+    }
+
     private fun descendants(view: View): Sequence<View> = sequence {
         yield(view)
         if (view is ViewGroup) for (index in 0 until view.childCount) yieldAll(descendants(view.getChildAt(index)))

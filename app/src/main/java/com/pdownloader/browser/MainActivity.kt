@@ -63,7 +63,8 @@ class MainActivity : ThemedActivity() {
         var preview: Bitmap? = null,
         var touched: Long = 0, var failed: Boolean = false,
         @Volatile var probeSession: ProbeSession? = null,
-        var recovery: DownloadTask? = null
+        var recovery: DownloadTask? = null,
+        var openerId: String? = null
     )
     private val tabs = mutableListOf<Tab>()
     private var selectedId = ""
@@ -122,7 +123,7 @@ class MainActivity : ThemedActivity() {
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         buildUi()
         applySystemBarAppearance()
-        restoreSession()
+        restoreSession(savedInstanceState)
         showTab(selectedId)
         if (savedInstanceState != null) {
             selectSection(savedInstanceState.getInt("section", 0).coerceIn(0, 2))
@@ -302,9 +303,10 @@ class MainActivity : ThemedActivity() {
     private fun load(url: String) {
         if (!AddressResolver.isWebUrl(url)) return
         val existing = current.web
+        val restoring = current.state != null
         current.url = url; current.failed = false
         showTab(selectedId)
-        existing?.loadUrl(url)
+        if (existing != null || restoring) current.web?.loadUrl(url)
         persistSession()
     }
 
@@ -320,7 +322,7 @@ class MainActivity : ThemedActivity() {
     fun openNewTab(url: String = "") { newTab(url) }
     private fun newTab(url: String = ""): Tab? {
         if (tabs.size >= 32) { toast("最多打开 32 个标签页，请先关闭部分标签"); return null }
-        val tab = Tab(url = url)
+        val tab = Tab(url = url, openerId = selectedId.takeIf { id -> tabs.any { it.id == id } })
         tabs.add(tab); showTab(tab.id); persistSession()
         return tab
     }
@@ -574,15 +576,14 @@ class MainActivity : ThemedActivity() {
         val hasPage = current.url.isNotEmpty()
         browserMenu = BrowserMenu(this,
             listOf(
-                MenuAction("back", "后退", backButton.isEnabled) { goBack() },
                 MenuAction("forward", "前进", forwardButton.isEnabled) { web?.goForward() },
                 MenuAction("star", "收藏当前网页", hasPage) { bookmark() },
-                MenuAction("share", "分享网页", hasPage) { sharePage() },
                 MenuAction("reload", "刷新网页", hasPage) { current.failed = false; web?.reload() }
             ), listOf(
                 MenuAction("plus", "新建标签页") { newTab() },
                 MenuAction("history", "历史记录") { openHistory() },
                 MenuAction("star", "收藏夹") { openBookmarks() },
+                MenuAction("share", "分享网页", hasPage) { sharePage() },
                 MenuAction("settings", "设置") { startActivity(Intent(this, SettingsActivity::class.java)) },
                 MenuAction("info", "关于") { showAbout() }
             ))
@@ -634,10 +635,11 @@ class MainActivity : ThemedActivity() {
     fun closeTab(id: String) {
         val index = tabs.indexOfFirst { it.id == id }
         if (index < 0) return
+        val opener = tabs[index].openerId?.takeIf { candidate -> tabs.any { it.id == candidate } }
         exitFullscreen()
         release(tabs[index], false); tabs.removeAt(index)
         if (tabs.isEmpty()) tabs.add(Tab())
-        if (id == selectedId) selectedId = tabs[index.coerceAtMost(tabs.lastIndex)].id
+        if (id == selectedId) selectedId = opener ?: tabs[index.coerceAtMost(tabs.lastIndex)].id
         showTab(selectedId)
         if (tabsOpen) renderTabs()
     }
@@ -757,7 +759,7 @@ class MainActivity : ThemedActivity() {
         view.destroy()
     }
 
-    private fun restoreSession() {
+    private fun restoreSession(savedInstanceState: Bundle?) {
         val preferences = getSharedPreferences("session", MODE_PRIVATE)
         val pending = mutableListOf<Pair<Tab, String>>()
         runCatching {
@@ -767,6 +769,8 @@ class MainActivity : ThemedActivity() {
                 val url = value.optString("url").takeIf { it.isEmpty() || AddressResolver.isWebUrl(it) } ?: ""
                 val id = value.optString("id").takeIf { it.isNotBlank() && tabs.none { tab -> tab.id == it } } ?: UUID.randomUUID().toString()
                 val tab = Tab(id, url, value.optString("title", "新标签页"))
+                tab.openerId = value.optString("opener").takeIf(String::isNotBlank)
+                tab.state = savedInstanceState?.getBundle("web:$id")
                 tabs.add(tab)
                 value.optString("recovery").takeIf(String::isNotBlank)?.let { pending.add(tab to it) }
             }
@@ -791,11 +795,12 @@ class MainActivity : ThemedActivity() {
     private fun persistSession() {
         if (tabs.isEmpty()) return
         val data = JSONArray()
-        tabs.forEach { data.put(JSONObject().put("id", it.id).put("url", it.url).put("title", it.title).put("recovery", it.recovery?.id)) }
+        tabs.forEach { data.put(JSONObject().put("id", it.id).put("url", it.url).put("title", it.title)
+            .put("recovery", it.recovery?.id).put("opener", it.openerId)) }
         getSharedPreferences("session", MODE_PRIVATE).edit().putString("tabs", data.toString()).putString("selected", selectedId).apply()
     }
 
-    private fun goBack() {
+    internal fun goBack() {
         when {
             mediaSheet?.isShowing() == true -> mediaSheet?.dismiss()
             fullView != null -> exitFullscreen()
@@ -805,6 +810,7 @@ class MainActivity : ThemedActivity() {
             section != 0 -> selectSection(0)
             address.hasFocus() || homePage?.searchFocused == true -> hideKeyboard()
             current.web?.canGoBack() == true -> current.web?.goBack()
+            current.openerId?.let { id -> tabs.any { it.id == id } } == true -> closeTab(current.id)
             current.url.isNotEmpty() -> navigateHome()
             else -> { persistSession(); moveTaskToBack(true) }
         }
@@ -1199,6 +1205,19 @@ class MainActivity : ThemedActivity() {
         }
     }
     override fun onSaveInstanceState(outState: Bundle) {
+        persistSession()
+        var stateBytes = 0
+        tabs.sortedByDescending { it.id == selectedId }.forEach { tab ->
+            val state = tab.web?.let { web -> Bundle().also { web.saveState(it) } } ?: tab.state
+            if (state != null) {
+                val parcel = android.os.Parcel.obtain()
+                val size = try { parcel.writeBundle(state); parcel.dataSize() } finally { parcel.recycle() }
+                if (size <= 96000 && stateBytes + size <= 384000) {
+                    outState.putBundle("web:${tab.id}", state)
+                    stateBytes += size
+                }
+            }
+        }
         outState.putString("exportTask", exportTaskId)
         outState.putBoolean("bookmarksOpen", bookmarksOpen)
         outState.putString("bookmarksQuery", bookmarks.query)
