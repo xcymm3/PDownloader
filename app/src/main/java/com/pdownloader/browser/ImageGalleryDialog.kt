@@ -36,7 +36,6 @@ class ImageGalleryDialog(
     private val isSelected: ((String) -> Boolean)? = null,
     private val select: ((String, Boolean) -> Unit)? = null,
     private val selectedCount: () -> Int = { 0 },
-    private val download: (() -> Unit)? = null,
     private val share: ((GalleryPicture) -> Unit)? = null,
     private val export: ((GalleryPicture) -> Unit)? = null,
     onDismiss: () -> Unit = {}
@@ -57,19 +56,17 @@ class ImageGalleryDialog(
         background = null; setPadding(activity.dp(12), 0, activity.dp(12), 0)
         visibility = if (select != null) View.VISIBLE else View.GONE
     }
-    private val previous = icon("back", "上一张") { goTo(index - 1) }
-    private val next = icon("forward", "下一张") { goTo(index + 1) }
-    private val downloadButton = icon("download", "下载已选资源") { download?.invoke() }
     private val loading = ProgressBar(activity)
     private val error = activity.label("暂时无法显示图片", 14f).apply { gravity = Gravity.CENTER; setTextColor(activity.color(R.color.video_foreground)); visibility = View.GONE }
 
     init {
         require(pictures.isNotEmpty())
-        val root = FrameLayout(activity).apply { setBackgroundColor(activity.color(R.color.gallery_scrim)); setOnClickListener { dismiss() } }
+        val root = FrameLayout(activity).apply { setBackgroundColor(android.graphics.Color.BLACK); setOnClickListener { dismiss() } }
         root.addView(adjacent, FrameLayout.LayoutParams(-1, -1))
         root.addView(image, FrameLayout.LayoutParams(-1, -1))
-        image.contentDescription = "图片预览，轻点关闭，双指缩放，左右滑动切换"
+        image.contentDescription = "图片预览，轻点关闭，双指缩放，左右轻划切换，长按分享或保存"
         image.setOnClickListener { dismiss() }
+        image.setOnLongClickListener { showPictureActions(); true }
         image.swipe = ::dragImage
         image.settle = ::settleImage
         root.addView(loading, FrameLayout.LayoutParams(activity.dp(32), activity.dp(32), Gravity.CENTER))
@@ -79,13 +76,6 @@ class ImageGalleryDialog(
         top.addView(counter, LinearLayout.LayoutParams(0, activity.dp(48), 1f))
         top.addView(check, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
         root.addView(top, FrameLayout.LayoutParams(-1, activity.dp(48), Gravity.TOP))
-        val bottom = activity.row().apply { gravity = Gravity.CENTER; setBackgroundColor(activity.color(R.color.gallery_controls)) }
-        bottom.addView(previous, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
-        if (download != null) bottom.addView(downloadButton, LinearLayout.LayoutParams(activity.dp(56), activity.dp(48)))
-        if (share != null) bottom.addView(icon("share", "分享图片") { share.invoke(pictures[index]) }, LinearLayout.LayoutParams(activity.dp(56), activity.dp(48)))
-        if (export != null) bottom.addView(icon("download", "导出图片") { export.invoke(pictures[index]) }, LinearLayout.LayoutParams(activity.dp(56), activity.dp(48)))
-        bottom.addView(next, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
-        root.addView(bottom, FrameLayout.LayoutParams(-1, activity.dp(56), Gravity.BOTTOM))
         root.setOnApplyWindowInsetsListener { _, insets ->
             if (Build.VERSION.SDK_INT >= 30) {
                 val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
@@ -99,7 +89,11 @@ class ImageGalleryDialog(
         setContentView(root)
         setOnShowListener {
             window?.apply {
-                setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+                setBackgroundDrawable(ColorDrawable(android.graphics.Color.BLACK))
+                @Suppress("DEPRECATION")
+                statusBarColor = android.graphics.Color.BLACK
+                @Suppress("DEPRECATION")
+                navigationBarColor = android.graphics.Color.BLACK
                 clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
                 setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
                 setLayout(-1, -1)
@@ -118,6 +112,16 @@ class ImageGalleryDialog(
             onDismiss()
         }
         refreshSelection()
+    }
+
+    private fun showPictureActions() {
+        if (animating) return
+        val picture = pictures[index]
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        share?.let { callback -> actions.add("分享图片" to { callback(picture) }) }
+        export?.let { callback -> actions.add("保存图片" to { callback(picture) }) }
+        if (actions.isEmpty()) return
+        android.app.AlertDialog.Builder(activity).setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }.show()
     }
 
     fun goTo(position: Int) {
@@ -159,7 +163,7 @@ class ImageGalleryDialog(
         if (animating) return
         val target = adjacentIndex
         val commit = target in pictures.indices && target != index &&
-            (abs(distance) >= image.width * .2f || abs(distance) >= activity.dp(40) && abs(velocity) > activity.dp(500))
+            GallerySwipe.shouldAdvance(distance, velocity, activity.resources.displayMetrics.density)
         animating = true
         val end = if (!commit) 0f else if (target > index) -image.width.toFloat() else image.width.toFloat()
         if (adjacent.visibility == View.VISIBLE) {
@@ -185,9 +189,6 @@ class ImageGalleryDialog(
         check.setOnCheckedChangeListener(null)
         check.isChecked = isSelected?.invoke(pictures[index].id) == true
         check.setOnCheckedChangeListener { _, value -> select?.invoke(pictures[index].id, value); refreshSelection() }
-        downloadButton.badgeCount = selectedCount()
-        downloadButton.isEnabled = selectedCount() > 0
-        previous.isEnabled = index > 0; next.isEnabled = index < pictures.lastIndex
     }
     private fun render(keepImage: Boolean = false) {
         refreshSelection()
@@ -221,6 +222,7 @@ internal class GalleryImageView(context: android.content.Context) : ImageView(co
     var settle: (Float, Float) -> Unit = { _, _ -> }
     private var swipeDistance = 0f
     private var swipeVelocity = 0f
+    private var velocityTracker: android.view.VelocityTracker? = null
     private var multiTouch = false
     private var zoom = 1f
     private var panX = 0f
@@ -229,18 +231,15 @@ internal class GalleryImageView(context: android.content.Context) : ImageView(co
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent) = true
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean { performClick(); return true }
+        override fun onLongPress(e: MotionEvent) { if (!multiTouch && swipeDistance == 0f) performLongClick() }
         override fun onDoubleTap(e: MotionEvent): Boolean { zoom = if (zoom > 1f) 1f else 2.5f; panX = 0f; panY = 0f; updateTransform(); return true }
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
             if (zoom > 1f) { panX -= distanceX; panY -= distanceY; updateTransform() }
-            else if (!multiTouch && e1 != null && abs(e2.x - e1.x) > abs(e2.y - e1.y)) {
-                swipeDistance = e2.x - e1.x
+            else if (!multiTouch && e1 != null && abs(e2.rawX - e1.rawX) > abs(e2.rawY - e1.rawY)) {
+                // The image translates during the drag; local coordinates would subtract that translation.
+                swipeDistance = e2.rawX - e1.rawX
                 swipe(swipeDistance)
             }
-            return true
-        }
-        override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
-            val delta = e2.x - (e1?.x ?: e2.x)
-            if (zoom == 1f && abs(delta) > context.dp(40) && abs(velocityX) > abs(velocityY)) swipeVelocity = velocityX
             return true
         }
     })
@@ -272,7 +271,17 @@ internal class GalleryImageView(context: android.content.Context) : ImageView(co
     // GestureDetector's confirmed-tap callback invokes performClick and emits accessibility events.
     @android.annotation.SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) { swipeDistance = 0f; swipeVelocity = 0f; multiTouch = false }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            swipeDistance = 0f; swipeVelocity = 0f; multiTouch = false
+            velocityTracker?.recycle()
+            velocityTracker = android.view.VelocityTracker.obtain()
+        }
+        // Track screen coordinates too, so moving the image does not distort flick velocity.
+        MotionEvent.obtain(event).also { screenEvent ->
+            screenEvent.offsetLocation(event.rawX - event.x, event.rawY - event.y)
+            velocityTracker?.addMovement(screenEvent)
+            screenEvent.recycle()
+        }
         if (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
             multiTouch = true
             if (swipeDistance != 0f) settle(0f, 0f)
@@ -280,9 +289,16 @@ internal class GalleryImageView(context: android.content.Context) : ImageView(co
         }
         scales.onTouchEvent(event); gestures.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP && swipeDistance != 0f) {
+            velocityTracker?.apply {
+                computeCurrentVelocity(1000)
+                if (!multiTouch && abs(xVelocity) > abs(yVelocity)) swipeVelocity = xVelocity
+            }
             settle(swipeDistance, swipeVelocity); swipeDistance = 0f
         } else if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
             settle(0f, 0f); swipeDistance = 0f
+        }
+        if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            velocityTracker?.recycle(); velocityTracker = null
         }
         return true
     }

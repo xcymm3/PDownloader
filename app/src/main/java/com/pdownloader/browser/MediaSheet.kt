@@ -244,7 +244,17 @@ class MediaSheet(
             pictures.indexOfFirst { it.id == id }, images,
             isSelected = { it in selected },
             select = { key, checked -> if (checked) selected.add(key) else selected.remove(key); sync() },
-            selectedCount = { choices().size }, download = ::downloadSelected,
+            selectedCount = { choices().size },
+            share = { picture ->
+                activity.startActivity(android.content.Intent.createChooser(android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "text/plain"; putExtra(android.content.Intent.EXTRA_TEXT, picture.url)
+                }, "分享图片链接"))
+            },
+            export = { picture ->
+                session.groups[picture.id]?.let { group ->
+                    group.variants.firstOrNull { it.blockedReason.isEmpty() }?.let { variant -> submit(listOf(group to variant)) }
+                }
+            },
             onDismiss = { if (preview === viewer) preview = null })
         preview = viewer; viewer.show()
     }

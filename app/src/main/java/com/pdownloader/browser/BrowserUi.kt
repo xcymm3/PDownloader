@@ -66,6 +66,12 @@ internal class BrowserIcon @JvmOverloads constructor(context: Context, private v
             canvas.drawPath(path, paint)
         }
         when (kind) {
+            "lock" -> {
+                canvas.drawRoundRect(5f, 11f, 19f, 21f, 2f, 2f, paint)
+                if (selectedIcon) canvas.drawArc(8f, 3f, 16f, 15f, 180f, 180f, false, paint)
+                else { canvas.drawArc(11f, 2f, 21f, 14f, 180f, 180f, false, paint); line(11f, 8f, 11f, 11f) }
+                line(12f, 15f, 12f, 17f)
+            }
             "settings" -> {
                 line(4f, 6f, 20f, 6f); line(4f, 12f, 20f, 12f); line(4f, 18f, 20f, 18f)
                 line(9f, 3f, 9f, 9f); line(15f, 9f, 15f, 15f); line(9f, 15f, 9f, 21f)

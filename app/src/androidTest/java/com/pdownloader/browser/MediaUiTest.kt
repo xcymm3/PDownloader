@@ -113,7 +113,8 @@ class MediaUiTest {
                     ), 0, images, isSelected = { it in selected }, select = { id, value -> if (value) selected.add(id) else selected.remove(id) }, selectedCount = { selected.size })
                     viewer!!.show()
                     val root = viewer!!.window!!.decorView.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
-                    assertTrue(Color.alpha((root.background as ColorDrawable).color) in 1..254)
+                    assertEquals(Color.BLACK, (root.background as ColorDrawable).color)
+                    assertFalse(descendants(root).any { it.contentDescription in listOf("上一张", "下一张", "分享图片", "导出图片") })
                     assertEquals(0, viewer!!.window!!.attributes.flags and WindowManager.LayoutParams.FLAG_DIM_BEHIND)
                     assertTrue(descendants(viewer!!.window!!.decorView).filterIsInstance<CheckBox>().single().isChecked)
                 }
@@ -195,6 +196,17 @@ class MediaUiTest {
                 hint.showSeekHint(2000, 4000)
                 assertTrue(descendants(hint).filterIsInstance<TextView>().any { view -> view.text == "0:02 / 0:04" })
                 assertFalse(descendants(it.window.decorView).filterIsInstance<TextView>().any { view -> view.text == "离线播放" })
+                val playerView = it.findViewById<PlayerView>(R.id.native_player)
+                val controls = it.findViewById<ViewGroup>(androidx.media3.ui.R.id.exo_basic_controls)
+                assertEquals(controls, it.findViewById<View>(R.id.player_previous).parent)
+                assertEquals(controls, it.findViewById<View>(R.id.player_next).parent)
+                assertNotNull(it.findViewById<View>(R.id.player_title))
+                it.setPlaybackSpeed(1.5f)
+                assertEquals(1.5f, playerView.player!!.playbackParameters.speed, .001f)
+                it.setControlsLocked(true)
+                assertFalse(playerView.useController)
+                it.setControlsLocked(false)
+                assertTrue(playerView.useController)
             }
             capture("seek-hud")
             scenario.onActivity {

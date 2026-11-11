@@ -39,7 +39,9 @@ class PlayerActivity : ThemedActivity() {
     private var position = 0L
     private var play = true
     private var task: com.pdownloader.browser.download.DownloadTask? = null
-    private lateinit var header: LinearLayout
+    private lateinit var lockButton: BrowserIcon
+    private var controlsLocked = false
+    private var playbackSpeed = 1f
     private lateinit var title: TextView
     private val memory by lazy { PlaybackMemory(this) }
     private var playlist = emptyList<com.pdownloader.browser.download.DownloadTask>()
@@ -59,6 +61,7 @@ class PlayerActivity : ThemedActivity() {
         super.onCreate(savedInstanceState)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         play = savedInstanceState?.getBoolean("playing", true) ?: true
+        playbackSpeed = savedInstanceState?.getFloat("speed", 1f) ?: 1f
         task = (savedInstanceState?.getString("task") ?: intent.getStringExtra("task"))?.let { DownloadRepository.get(this).get(it) }
             ?: (savedInstanceState?.getString("preview") ?: intent.getStringExtra("preview"))?.let { runCatching { DownloadRepository.decode(it) }.getOrNull() }
         if (task == null) { finish(); return }
@@ -90,47 +93,47 @@ class PlayerActivity : ThemedActivity() {
             }
             insets
         }
-        header = row().apply { contentDescription = "播放器标题栏" }
-        header.addView(BrowserIcon(this, "back", "返回浏览器") { finish() }.apply { foregroundColor = color(R.color.video_foreground) }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        title = label(task!!.title, 15f).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setTextColor(color(R.color.video_foreground)) }
-        header.addView(title, LinearLayout.LayoutParams(0, dp(52), 1f))
-        listOf(false, true).forEach { next ->
-            val button = BrowserIcon(this, if (next) "next_video" else "previous_video", if (next) "下一个视频" else "上一个视频") { switchVideo(next) }
-                .apply { foregroundColor = color(R.color.video_foreground) }
-            navigation.add(button to next)
-            header.addView(button, LinearLayout.LayoutParams(dp(48), dp(48)))
-        }
-        layout.addView(header)
-        if (task!!.state != TaskState.COMPLETE) header.addView(BrowserIcon(this, "external", "打开来源网页") {
-            startActivity(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_VIEW).setData(Uri.parse(task!!.context.pageUrl))); finish()
-        }.apply { foregroundColor = color(R.color.video_foreground) }, LinearLayout.LayoutParams(dp(48), dp(48)))
         playerView = (layoutInflater.inflate(R.layout.browser_player_view, layout, false) as PlayerView).apply {
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING); setKeepContentOnPlayerReset(true)
         }
+        title = playerView.findViewById<TextView>(R.id.player_title).apply { text = task!!.title }
+        playerView.findViewById<View>(R.id.player_back).setOnClickListener { handleBack() }
+        playerView.findViewById<View>(R.id.player_fullscreen_toggle).setOnClickListener { setPlayerFullscreen(!fullscreen) }
+        playerView.findViewById<View>(R.id.player_speed).setOnClickListener { showPlaybackSpeeds() }
+        updateSpeedLabel()
         listOf(R.id.player_previous to false, R.id.player_next to true).forEach { (id, next) ->
             val button = playerView.findViewById<View>(id)
             button.setOnClickListener { switchVideo(next) }
             navigation.add(button to next)
         }
         updateNavigation()
-        val gestures = SeekGestureFrame(this, read = { player?.takeIf { canSeek }?.let { SeekPosition(it.currentPosition, it.duration) } }, commit = { seekToPosition(it) })
+        val gestures = SeekGestureFrame(this, read = { player?.takeIf { canSeek && !controlsLocked }?.let { SeekPosition(it.currentPosition, it.duration) } }, commit = { seekToPosition(it) })
         gestures.addView(playerView, android.widget.FrameLayout.LayoutParams(-1, -1))
         gestures.installHint()
+        lockButton = BrowserIcon(this, "lock", "锁定播放控件") { setControlsLocked(!controlsLocked) }.apply {
+            foregroundColor = color(R.color.video_foreground)
+        }
+        gestures.addView(lockButton, android.widget.FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL).apply { rightMargin = dp(12) })
+        playerView.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
+            lockButton.visibility = if (controlsLocked || visibility == View.VISIBLE) View.VISIBLE else View.GONE
+        })
         gestures.excluded = { x, y ->
-            val controls = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_bottom_bar)
             val rect = android.graphics.Rect()
-            controls?.isShown == true && controls.getGlobalVisibleRect(rect) && rect.contains(x.toInt(), y.toInt())
+            controlsLocked || listOf<View?>(lockButton,
+                playerView.findViewById(R.id.player_title_bar),
+                playerView.findViewById(androidx.media3.ui.R.id.exo_bottom_bar)
+            ).any { control -> control?.isShown == true && control.getGlobalVisibleRect(rect) && rect.contains(x.toInt(), y.toInt()) }
         }
         layout.addView(gestures, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(layout)
-        playerView.setFullscreenButtonClickListener { setPlayerFullscreen(it) }
         playerView.findViewById<DefaultTimeBar>(androidx.media3.ui.R.id.exo_progress)?.addListener(object : TimeBar.OnScrubListener {
             override fun onScrubStart(timeBar: TimeBar, position: Long) = Unit
             override fun onScrubMove(timeBar: TimeBar, position: Long) = Unit
             override fun onScrubStop(timeBar: TimeBar, position: Long, canceled: Boolean) { if (!canceled) seekToPosition(position) }
         })
         setPlayerFullscreen(savedInstanceState?.getBoolean("fullscreen") ?: false)
-        if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(0) { if (fullscreen) setPlayerFullscreen(false) else finish() }
+        setControlsLocked(savedInstanceState?.getBoolean("locked") ?: false)
+        if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(0) { handleBack() }
     }
     override fun onStart() {
         super.onStart()
@@ -164,6 +167,7 @@ class PlayerActivity : ThemedActivity() {
                     Toast.makeText(this@PlayerActivity, if (local) "本地视频无法播放，可能为不支持的编码或文件已损坏" else "在线预览失败，请返回来源网页播放", Toast.LENGTH_LONG).show()
                 }
             })
+            engine.setPlaybackSpeed(playbackSpeed)
             engine.prepare(); engine.playWhenReady = play
         }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -182,6 +186,42 @@ class PlayerActivity : ThemedActivity() {
         val engine = player ?: return
         position = if (engine.playbackState == Player.STATE_ENDED) 0 else engine.currentPosition
         memory.save(selected, position)
+    }
+
+    internal fun setControlsLocked(value: Boolean) {
+        controlsLocked = value
+        playerView.useController = !value
+        if (value) playerView.hideController() else playerView.showController()
+        lockButton.selectedIcon = value
+        lockButton.contentDescription = if (value) "解锁播放控件" else "锁定播放控件"
+        lockButton.tooltipText = lockButton.contentDescription
+        lockButton.visibility = View.VISIBLE
+    }
+
+    private fun handleBack() {
+        when {
+            controlsLocked -> setControlsLocked(false)
+            fullscreen -> setPlayerFullscreen(false)
+            else -> finish()
+        }
+    }
+
+    private fun showPlaybackSpeeds() {
+        val speeds = floatArrayOf(.5f, .75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
+        android.app.AlertDialog.Builder(this).setTitle("播放倍速")
+            .setSingleChoiceItems(speeds.map { "${it}×" }.toTypedArray(), speeds.indexOfFirst { it == playbackSpeed }) { dialog, which ->
+                setPlaybackSpeed(speeds[which]); dialog.dismiss()
+            }.setNegativeButton("取消", null).show()
+    }
+
+    internal fun setPlaybackSpeed(value: Float) {
+        playbackSpeed = value.coerceIn(.5f, 2f)
+        player?.setPlaybackSpeed(playbackSpeed)
+        updateSpeedLabel()
+    }
+
+    private fun updateSpeedLabel() {
+        playerView.findViewById<TextView>(R.id.player_speed).text = if (playbackSpeed == 1f) "倍速" else "${playbackSpeed}×"
     }
 
     private fun updateNavigation() {
@@ -226,6 +266,7 @@ class PlayerActivity : ThemedActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         val savedPosition = if (player?.playbackState == Player.STATE_ENDED) 0 else player?.currentPosition ?: position
         outState.putLong("position", savedPosition); outState.putBoolean("fullscreen", fullscreen)
+        outState.putFloat("speed", playbackSpeed); outState.putBoolean("locked", controlsLocked)
         task?.let { selected ->
             if (selected.state == TaskState.COMPLETE) outState.putString("task", selected.id)
             else outState.putString("preview", DownloadRepository.encode(selected).toString())
@@ -238,9 +279,10 @@ class PlayerActivity : ThemedActivity() {
         if (value && !fullscreen) previousOrientation = requestedOrientation
         fullscreen = value
         requestedOrientation = if (value) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else previousOrientation
-        header.visibility = if (value) View.GONE else View.VISIBLE
-        playerView.findViewById<View>(R.id.player_video_navigation).visibility = if (value) View.VISIBLE else View.GONE
-        playerView.setFullscreenButtonState(value)
+        playerView.findViewById<android.widget.ImageButton>(R.id.player_fullscreen_toggle).apply {
+            setImageResource(if (value) R.drawable.player_exit_fullscreen else R.drawable.player_fullscreen)
+            contentDescription = if (value) "退出全屏" else "全屏播放"
+        }
         if (Build.VERSION.SDK_INT >= 30) window.insetsController?.apply {
             if (value) { hide(WindowInsets.Type.systemBars()); systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE }
             else show(WindowInsets.Type.systemBars())
@@ -248,7 +290,7 @@ class PlayerActivity : ThemedActivity() {
         window.decorView.requestApplyInsets()
     }
     @Deprecated("Handled by the platform back dispatcher on Android 13+")
-    override fun onBackPressed() { if (fullscreen) setPlayerFullscreen(false) else finish() }
+    override fun onBackPressed() { handleBack() }
     override fun onStop() {
         main.removeCallbacks(remember)
         savePosition()
