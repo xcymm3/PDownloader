@@ -1,4 +1,7 @@
 <resources>
+    <color name="nav_selected">#FFB4A7</color>
+    <color name="nav_unselected">#A6A9B1</color>
+    <color name="nav_selected_background">#4E2E2B</color>
     <color name="surface">#141414</color>
     <color name="surface_secondary">#252525</color>
     <color name="ink">#E8EAED</color>

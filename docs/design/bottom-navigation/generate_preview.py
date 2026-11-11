@@ -42,7 +42,7 @@ for row in range(3):
             icon(name,cx-16,cy-16,32,selected if i==row else muted)
         parts.append(f'<rect x="{x+206}" y="{y+89}" width="100" height="4" rx="2" fill="{muted}" opacity=".45"/>')
 text(56, 1018, '24 × 24 网格   ·   1.8px 圆角描边   ·   统一视觉大小', 15, '#808186')
-text(1144, 1018, '仅设计预览，尚未替换应用', 15, '#808186', anchor='end')
+text(1144, 1018, '已确认 · 应用于 0.3.9', 15, '#808186', anchor='end')
 parts.append('</svg>')
 svg = '\n'.join(parts)
 ElementTree.fromstring(svg)

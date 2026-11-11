@@ -235,7 +235,7 @@ class MainActivity : ThemedActivity() {
         chrome.addView(tabOverview, LinearLayout.LayoutParams(-1, 0, 1f))
         chrome.addView(View(this).apply { setBackgroundColor(color(R.color.divider)) }, LinearLayout.LayoutParams(-1, dp(1)))
         val nav = row()
-        listOf(Triple("home", "浏览", 0), Triple("download", "下载中", 1), Triple("done", "已下载", 2)).forEach { (kind, title, index) ->
+        listOf(Triple("nav_browse", "浏览", 0), Triple("nav_downloading", "下载中", 1), Triple("nav_downloaded", "已下载", 2)).forEach { (kind, title, index) ->
             val image = icon(kind, title) { selectSection(index) }
             bottomIcons.add(image)
             nav.addView(image, LinearLayout.LayoutParams(0, dp(52), 1f))

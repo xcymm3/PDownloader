@@ -1,6 +1,6 @@
 # 底部导航 SVG 预览
 
-此目录仅保存设计稿，尚未替换 Android 应用图标。
+此目录保存已确认的 SVG 设计稿。自 0.3.9 起，应用底部导航使用对应的 Android VectorDrawable（`app/src/main/res/drawable/nav_*.xml`），保留一致的路径、描边和主题配色。
 
 - `browse.svg`：地球经纬线，代表浏览网页。
 - `downloading.svg`：闭合圆环与向下箭头，代表下载中。

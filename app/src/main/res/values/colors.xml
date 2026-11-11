@@ -1,4 +1,7 @@
 <resources>
+    <color name="nav_selected">#C33425</color>
+    <color name="nav_unselected">#73767F</color>
+    <color name="nav_selected_background">#FBE5E0</color>
     <!-- Hallmark · native browser workbench; Chrome-familiar layout; system typography.
          Pre-emit critique: Philosophy 4, Hierarchy 4, Execution 4, Specificity 5, Restraint 5, Variety 4. -->
     <color name="surface">#FFFFFF</color>

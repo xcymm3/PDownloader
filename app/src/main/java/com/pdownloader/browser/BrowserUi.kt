@@ -35,6 +35,12 @@ internal fun Context.action(value: String, block: () -> Unit) = label(value).app
 internal class BrowserIcon @JvmOverloads constructor(context: Context, private val kind: String = "home", description: String = "", onClick: () -> Unit = {}) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.9f; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
     private val path = Path()
+    private val navigationDrawable = when (kind) {
+        "nav_browse" -> R.drawable.nav_browse
+        "nav_downloading" -> R.drawable.nav_downloading
+        "nav_downloaded" -> R.drawable.nav_downloaded
+        else -> null
+    }?.let { context.getDrawable(it)?.mutate() }
     var foregroundColor: Int? = null
         set(value) { field = value; invalidate() }
     var glyphSizeDp = 22
@@ -53,6 +59,24 @@ internal class BrowserIcon @JvmOverloads constructor(context: Context, private v
     }
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        navigationDrawable?.let { drawable ->
+            if (selectedIcon) {
+                paint.style = Paint.Style.FILL
+                paint.color = context.color(R.color.nav_selected_background)
+                val halfWidth = context.dp(28).toFloat()
+                val halfHeight = context.dp(18).toFloat()
+                canvas.drawRoundRect(width / 2f - halfWidth, height / 2f - halfHeight,
+                    width / 2f + halfWidth, height / 2f + halfHeight, halfHeight, halfHeight, paint)
+            }
+            val size = context.dp(24)
+            val left = (width - size) / 2
+            val top = (height - size) / 2
+            drawable.setBounds(left, top, left + size, top + size)
+            drawable.setTint(context.color(if (selectedIcon) R.color.nav_selected else R.color.nav_unselected))
+            drawable.alpha = if (isEnabled) 255 else 85
+            drawable.draw(canvas)
+            return
+        }
         canvas.save()
         val unit = context.dp(glyphSizeDp).toFloat() / 24
         canvas.translate((width - 24 * unit) / 2, (height - 24 * unit) / 2)

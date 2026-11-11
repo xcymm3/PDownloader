@@ -1,0 +1,7 @@
+<!-- Converted from docs/design/bottom-navigation/downloading.svg. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeWidth="1.8" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M20.75,12a8.75,8.75 0,1 1,-17.5 0a8.75,8.75 0,1 1,17.5 0M12,7.5v9m-3.5,-3.5l3.5,3.5 3.5,-3.5" />
+</vector>
