@@ -117,14 +117,18 @@ class MediaUiTest {
                     assertEquals(0, viewer!!.window!!.attributes.flags and WindowManager.LayoutParams.FLAG_DIM_BEHIND)
                     assertTrue(descendants(viewer!!.window!!.decorView).filterIsInstance<CheckBox>().single().isChecked)
                 }
-                await { onMain { descendants(viewer!!.window!!.decorView).filterIsInstance<ImageView>().single().drawable != null } }
+                await { onMain { descendants(viewer!!.window!!.decorView).filterIsInstance<ImageView>().any { it.isShown && it.drawable != null } } }
                 capture("image-gallery")
-                scenario.onActivity { viewer!!.goTo(1); assertFalse(descendants(viewer!!.window!!.decorView).filterIsInstance<CheckBox>().single().isChecked) }
-                await { onMain { descendants(viewer!!.window!!.decorView).filterIsInstance<ImageView>().single().drawable != null } }
+                scenario.onActivity { viewer!!.goTo(1) }
+                await { onMain { !descendants(viewer!!.window!!.decorView).filterIsInstance<CheckBox>().single().isChecked &&
+                    descendants(viewer!!.window!!.decorView).filterIsInstance<ImageView>().any { it.isShown && it.drawable != null } } }
                 scenario.onActivity {
                     selected.add("remote"); viewer!!.refreshSelection()
                     assertTrue(descendants(viewer!!.window!!.decorView).filterIsInstance<CheckBox>().single().isChecked)
                     viewer!!.goTo(0)
+                }
+                await { onMain { descendants(viewer!!.window!!.decorView).filterIsInstance<TextView>().any { it.text.toString().startsWith("1 /") } } }
+                scenario.onActivity {
                     assertTrue(descendants(viewer!!.window!!.decorView).filterIsInstance<CheckBox>().single().isChecked)
                     viewer!!.dismiss()
                 }
@@ -171,6 +175,41 @@ class MediaUiTest {
                     }
                 }
             }
+        }
+    }
+
+    @Test fun downloadedVideoNavigationAndProgressSurviveClosingThePlayer() {
+        val first = task("/sample.mp4?queue=1", MediaKind.VIDEO)
+        val second = task("/sample.mp4?queue=2", MediaKind.VIDEO)
+        val engine = DownloadEngine(repository, MediaHttp(allowLocalTests = true))
+        engine.run(first.id); engine.run(second.id)
+        fun launch() = ActivityScenario.launch<PlayerActivity>(Intent(context, PlayerActivity::class.java).putExtra("task", second.id))
+        var host: PlayerActivity? = null
+        fun ready() = onMain { host?.canSeek == true && host!!.findViewById<PlayerView>(R.id.native_player).player!!.playbackState == Player.STATE_READY }
+        launch().use { scenario ->
+            scenario.onActivity { host = it; it.findViewById<PlayerView>(R.id.native_player).player!!.pause() }
+            await(::ready)
+            scenario.onActivity {
+                assertTrue(it.seekToPosition(2000))
+                val hint = descendants(it.window.decorView).filterIsInstance<SeekGestureFrame>().single()
+                hint.showSeekHint(2000, 4000)
+                assertTrue(descendants(hint).filterIsInstance<TextView>().any { view -> view.text == "0:02 / 0:04" })
+                assertFalse(descendants(it.window.decorView).filterIsInstance<TextView>().any { view -> view.text == "离线播放" })
+            }
+            capture("seek-hud")
+            scenario.onActivity {
+                it.switchVideo(true)
+                it.findViewById<PlayerView>(R.id.native_player).player!!.pause()
+            }
+            await(::ready)
+            scenario.onActivity { it.switchVideo(false); it.findViewById<PlayerView>(R.id.native_player).player!!.pause() }
+            await(::ready)
+            scenario.onActivity { assertTrue(kotlin.math.abs(it.playbackPositionMs - 2000) < 250) }
+        }
+        launch().use { scenario ->
+            scenario.onActivity { host = it; it.findViewById<PlayerView>(R.id.native_player).player!!.pause() }
+            await(::ready)
+            scenario.onActivity { assertTrue(kotlin.math.abs(it.playbackPositionMs - 2000) < 250) }
         }
     }
     private fun onMain(check: () -> Boolean): Boolean { var result = false; instrumentation.runOnMainSync { result = check() }; return result }
