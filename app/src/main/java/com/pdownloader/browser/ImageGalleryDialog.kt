@@ -43,6 +43,12 @@ class ImageGalleryDialog(
 ) : Dialog(activity, R.style.ImageViewerTheme) {
     private var index = initialIndex.coerceIn(0, max(0, pictures.lastIndex))
     private val image = GalleryImageView(activity)
+    private val adjacent = GalleryImageView(activity).apply {
+        visibility = View.GONE; isClickable = false; isFocusable = false
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    private var adjacentIndex = -1
+    private var animating = false
     private val counter = activity.label("", 14f).apply { gravity = Gravity.CENTER; setTextColor(activity.color(R.color.video_foreground)) }
     private val check = CheckBox(activity).apply {
         contentDescription = "选择当前图片"; tooltipText = "选择当前图片"
@@ -60,10 +66,12 @@ class ImageGalleryDialog(
     init {
         require(pictures.isNotEmpty())
         val root = FrameLayout(activity).apply { setBackgroundColor(activity.color(R.color.gallery_scrim)); setOnClickListener { dismiss() } }
+        root.addView(adjacent, FrameLayout.LayoutParams(-1, -1))
         root.addView(image, FrameLayout.LayoutParams(-1, -1))
         image.contentDescription = "图片预览，轻点关闭，双指缩放，左右滑动切换"
         image.setOnClickListener { dismiss() }
-        image.navigate = { delta -> goTo(index + delta) }
+        image.swipe = ::dragImage
+        image.settle = ::settleImage
         root.addView(loading, FrameLayout.LayoutParams(activity.dp(32), activity.dp(32), Gravity.CENTER))
         root.addView(error, FrameLayout.LayoutParams(-1, activity.dp(64), Gravity.CENTER))
         val top = activity.row().apply { setBackgroundColor(activity.color(R.color.gallery_controls)); setPadding(activity.dp(4), 0, activity.dp(4), 0) }
@@ -103,13 +111,74 @@ class ImageGalleryDialog(
             }
             render()
         }
-        setOnDismissListener { image.tag = null; image.setImageDrawable(null); onDismiss() }
+        setOnDismissListener {
+            image.animate().cancel(); adjacent.animate().cancel()
+            image.tag = null; adjacent.tag = null
+            image.setImageDrawable(null); adjacent.setImageDrawable(null)
+            onDismiss()
+        }
         refreshSelection()
     }
 
     fun goTo(position: Int) {
-        if (position !in pictures.indices || position == index) return
-        index = position; render()
+        if (position !in pictures.indices || position == index || animating) return
+        if (image.width == 0) { index = position; render(); return }
+        prepareAdjacent(position)
+        settleImage(if (position > index) -image.width.toFloat() else image.width.toFloat(), 0f)
+    }
+
+    private fun prepareAdjacent(position: Int) {
+        if (position == adjacentIndex) {
+            adjacent.visibility = View.VISIBLE
+            return
+        }
+        adjacentIndex = position
+        adjacent.tag = null
+        adjacent.setImageDrawable(null)
+        val picture = pictures.getOrNull(position) ?: return
+        adjacent.visibility = View.VISIBLE
+        loadPicture(adjacent, picture) {}
+    }
+
+    private fun dragImage(distance: Float) {
+        if (animating) return
+        val target = index + if (distance < 0) 1 else -1
+        if (target !in pictures.indices) {
+            adjacentIndex = -1
+            adjacent.tag = null
+            adjacent.visibility = View.GONE
+            image.translationX = distance * .2f
+            return
+        }
+        prepareAdjacent(target)
+        image.translationX = distance
+        adjacent.translationX = distance + if (distance < 0) image.width else -image.width
+    }
+
+    private fun settleImage(distance: Float, velocity: Float) {
+        if (animating) return
+        val target = adjacentIndex
+        val commit = target in pictures.indices && target != index &&
+            (abs(distance) >= image.width * .2f || abs(distance) >= activity.dp(40) && abs(velocity) > activity.dp(500))
+        animating = true
+        val end = if (!commit) 0f else if (target > index) -image.width.toFloat() else image.width.toFloat()
+        if (adjacent.visibility == View.VISIBLE) {
+            val offset = if (target > index) image.width.toFloat() else -image.width.toFloat()
+            if (image.translationX == 0f) adjacent.translationX = offset
+            adjacent.animate().translationX(end + offset).setDuration(200).start()
+        }
+        image.animate().translationX(end).setDuration(200).withEndAction {
+            if (commit) {
+                index = target
+                image.setImageDrawable(adjacent.drawable)
+            }
+            image.translationX = 0f
+            adjacent.visibility = View.GONE
+            adjacent.tag = null
+            adjacentIndex = -1
+            animating = false
+            if (commit) render(keepImage = image.drawable != null)
+        }.start()
     }
     fun refreshSelection() {
         counter.text = if (select == null) "${index + 1} / ${pictures.size}" else activity.getString(R.string.image_page, index + 1, pictures.size, selectedCount())
@@ -120,17 +189,25 @@ class ImageGalleryDialog(
         downloadButton.isEnabled = selectedCount() > 0
         previous.isEnabled = index > 0; next.isEnabled = index < pictures.lastIndex
     }
-    private fun render() {
+    private fun render(keepImage: Boolean = false) {
         refreshSelection()
         val picture = pictures[index]
         loading.visibility = View.VISIBLE; error.visibility = View.GONE
-        image.setImageDrawable(null)
+        if (!keepImage) image.setImageDrawable(null)
         val result: (Boolean) -> Unit = { ok ->
             if (isShowing) { loading.visibility = View.GONE; error.visibility = if (ok) View.GONE else View.VISIBLE }
         }
-        if (picture.uri != null) images.loadUri(image, picture.uri, result)
-        else if (picture.file != null) images.loadFile(image, picture.file, result)
-        else if (picture.context != null) images.loadPreview(image, picture.url, picture.context, result)
+        loadPicture(image, picture, result)
+        if (!animating && index < pictures.lastIndex) {
+            prepareAdjacent(index + 1)
+            adjacent.visibility = View.GONE
+        }
+    }
+
+    private fun loadPicture(view: ImageView, picture: GalleryPicture, result: (Boolean) -> Unit) {
+        if (picture.uri != null) images.loadUri(view, picture.uri, result)
+        else if (picture.file != null) images.loadFile(view, picture.file, result)
+        else if (picture.context != null) images.loadPreview(view, picture.url, picture.context, result)
         else { loading.visibility = View.GONE; error.visibility = View.VISIBLE }
     }
     private fun icon(kind: String, description: String, action: () -> Unit) = BrowserIcon(activity, kind, description, action).apply {
@@ -140,7 +217,11 @@ class ImageGalleryDialog(
 
 /** Matrix coordinates stay in the viewport, so pan and pinch do not move the touch target. */
 internal class GalleryImageView(context: android.content.Context) : ImageView(context) {
-    var navigate: (Int) -> Unit = {}
+    var swipe: (Float) -> Unit = {}
+    var settle: (Float, Float) -> Unit = { _, _ -> }
+    private var swipeDistance = 0f
+    private var swipeVelocity = 0f
+    private var multiTouch = false
     private var zoom = 1f
     private var panX = 0f
     private var panY = 0f
@@ -151,11 +232,15 @@ internal class GalleryImageView(context: android.content.Context) : ImageView(co
         override fun onDoubleTap(e: MotionEvent): Boolean { zoom = if (zoom > 1f) 1f else 2.5f; panX = 0f; panY = 0f; updateTransform(); return true }
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
             if (zoom > 1f) { panX -= distanceX; panY -= distanceY; updateTransform() }
+            else if (!multiTouch && e1 != null && abs(e2.x - e1.x) > abs(e2.y - e1.y)) {
+                swipeDistance = e2.x - e1.x
+                swipe(swipeDistance)
+            }
             return true
         }
         override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
             val delta = e2.x - (e1?.x ?: e2.x)
-            if (zoom == 1f && abs(delta) > context.dp(40) && abs(velocityX) > abs(velocityY)) navigate(if (delta < 0) 1 else -1)
+            if (zoom == 1f && abs(delta) > context.dp(40) && abs(velocityX) > abs(velocityY)) swipeVelocity = velocityX
             return true
         }
     })
@@ -187,7 +272,18 @@ internal class GalleryImageView(context: android.content.Context) : ImageView(co
     // GestureDetector's confirmed-tap callback invokes performClick and emits accessibility events.
     @android.annotation.SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) { swipeDistance = 0f; swipeVelocity = 0f; multiTouch = false }
+        if (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+            multiTouch = true
+            if (swipeDistance != 0f) settle(0f, 0f)
+            swipeDistance = 0f
+        }
         scales.onTouchEvent(event); gestures.onTouchEvent(event)
+        if (event.actionMasked == MotionEvent.ACTION_UP && swipeDistance != 0f) {
+            settle(swipeDistance, swipeVelocity); swipeDistance = 0f
+        } else if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            settle(0f, 0f); swipeDistance = 0f
+        }
         return true
     }
     override fun performClick(): Boolean = super.performClick()
