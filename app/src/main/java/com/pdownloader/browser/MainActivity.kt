@@ -284,7 +284,7 @@ class MainActivity : ThemedActivity() {
             .toList()
         io.execute {
             val saved = runCatching { store.suggest(query) }.getOrDefault(emptyList())
-            runOnUiThread { if (!isDestroyed) deliver((openTabs + saved).distinctBy { it.url }.take(8)) }
+            runOnUiThread { if (!isDestroyed) deliver((openTabs + saved).distinctBy { it.url }.take(MAX_ADDRESS_SUGGESTIONS)) }
         }
     }
 

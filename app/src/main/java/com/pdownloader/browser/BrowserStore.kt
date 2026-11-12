@@ -99,7 +99,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, "browser.db", n
                 while (cursor.moveToNext()) add(AddressSuggestion(
                     cursor.getString(0), cursor.getString(1), if (cursor.getInt(2) == 1) "收藏" else "历史"
                 ))
-            }.distinctBy { it.url }.take(8)
+            }.distinctBy { it.url }.take(MAX_ADDRESS_SUGGESTIONS)
         }
     }
     fun delete(table: String, id: Long) {
