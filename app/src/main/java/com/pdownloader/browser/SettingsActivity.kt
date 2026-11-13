@@ -83,6 +83,7 @@ class SettingsActivity : ThemedActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val settings = DownloadSettings(this)
+        val playback = PlaybackSettings(this)
         val root = column().apply { setBackgroundColor(color(R.color.surface_secondary)) }
         val heading = row().apply { setPadding(dp(8), dp(8), dp(16), dp(8)) }
         heading.addView(BrowserIcon(this, "back", "返回") { finish() }, LinearLayout.LayoutParams(dp(48), dp(52)))
@@ -119,6 +120,8 @@ class SettingsActivity : ThemedActivity() {
         }
         section("外观")
         option("主题", themeName(), "settings", ::chooseTheme)
+        section("播放")
+        toggle("播放器手势", playback.gesturesEnabled) { playback.gesturesEnabled = it }
         section("下载")
         val locations = arrayOf("公共下载目录", "应用私有目录")
         val location = option("下载到", locations[if (settings.saveToPublic) 0 else 1], "download") {}

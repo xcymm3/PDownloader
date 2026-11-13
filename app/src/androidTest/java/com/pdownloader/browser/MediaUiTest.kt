@@ -192,7 +192,7 @@ class MediaUiTest {
             await(::ready)
             scenario.onActivity {
                 assertTrue(it.seekToPosition(2000))
-                val hint = descendants(it.window.decorView).filterIsInstance<SeekGestureFrame>().single()
+                val hint = descendants(it.window.decorView).filterIsInstance<PlayerGestureFrame>().single()
                 hint.showSeekHint(2000, 4000)
                 assertTrue(descendants(hint).filterIsInstance<TextView>().any { view -> view.text == "0:02 / 0:04" })
                 assertFalse(descendants(it.window.decorView).filterIsInstance<TextView>().any { view -> view.text == "离线播放" })
@@ -222,6 +222,81 @@ class MediaUiTest {
             scenario.onActivity { host = it; it.findViewById<PlayerView>(R.id.native_player).player!!.pause() }
             await(::ready)
             scenario.onActivity { assertTrue(kotlin.math.abs(it.playbackPositionMs - 2000) < 250) }
+        }
+    }
+    @Test fun nativeGestureStateControlsSeekingBrightnessVolumeAndPlaybackWithoutInputInjection() {
+        val video = task("/sample.mp4?native-gestures", MediaKind.VIDEO)
+        DownloadEngine(repository, MediaHttp(allowLocalTests = true)).run(video.id)
+        val audio = context.getSystemService(android.media.AudioManager::class.java)
+        val originalVolume = audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+        val settings = PlaybackSettings(context)
+        val originalGesturesEnabled = settings.gesturesEnabled
+        settings.gesturesEnabled = true
+        try {
+            ActivityScenario.launch<PlayerActivity>(Intent(context, PlayerActivity::class.java).putExtra("task", video.id)).use { scenario ->
+                var host: PlayerActivity? = null
+                scenario.onActivity { host = it; it.findViewById<PlayerView>(R.id.native_player).player!!.pause() }
+                await { onMain { host?.canSeek == true } }
+                scenario.onActivity { activity ->
+                    val engine = activity.findViewById<PlayerView>(R.id.native_player).player!!
+                    val gestures = descendants(activity.window.decorView).filterIsInstance<PlayerGestureFrame>().single()
+                    activity.seekToPosition(1000)
+                    gestures.beginProgress(0.0, GesturePlaybackPosition(1000, engine.duration))
+                    gestures.moveProgress(5.0)
+                    assertEquals("定位在松手之前发生", 1500L, engine.currentPosition)
+                    assertFalse(engine.playWhenReady)
+                    gestures.finishGesture()
+                    assertFalse("原先暂停，结束拖动后仍暂停", engine.playWhenReady)
+                    engine.play()
+                    gestures.beginProgress(0.0, GesturePlaybackPosition(1500, engine.duration))
+                    assertFalse(engine.playWhenReady)
+                    gestures.moveProgress(5.0); gestures.finishGesture()
+                    assertTrue("原先播放，结束拖动后恢复播放", engine.playWhenReady)
+                    engine.pause()
+
+                    activity.window.attributes = activity.window.attributes.apply { screenBrightness = .4f }
+                    gestures.beginLevel(true, 0.0); gestures.moveLevel(100.0)
+                    assertEquals(.9f, activity.window.attributes.screenBrightness, .001f)
+                    gestures.moveLevel(300.0); gestures.moveLevel(299.0)
+                    assertEquals(.995f, activity.window.attributes.screenBrightness, .001f)
+                    gestures.finishGesture()
+
+                    val maximum = audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                    if (!audio.isVolumeFixed && maximum > 0) {
+                        audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, maximum / 2, 0)
+                        val initial = audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC).toFloat() / maximum
+                        gestures.beginLevel(false, 0.0); gestures.moveLevel(100.0); gestures.finishGesture()
+                        val actual = audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC).toFloat() / maximum
+                        assertEquals((initial + 1f / 3).coerceAtMost(1f), actual, 1f / maximum)
+                    }
+                    gestures.doubleTap(0, 1000); assertTrue(engine.playWhenReady)
+                    gestures.doubleTap(0, 1100); assertFalse(engine.playWhenReady)
+                    val playback = PlaybackSettings(activity)
+                    playback.gesturesEnabled = false
+                    gestures.doubleTap(0, 1150); assertFalse(engine.playWhenReady)
+                    playback.gesturesEnabled = true
+                    activity.setControlsLocked(true)
+                    gestures.doubleTap(0, 1200); assertFalse(engine.playWhenReady)
+                    val brightness = activity.window.attributes.screenBrightness
+                    gestures.beginLevel(true, 0.0); gestures.moveLevel(-100.0)
+                    assertEquals(brightness, activity.window.attributes.screenBrightness, .001f)
+                    activity.setControlsLocked(false)
+                    gestures.beginLevel(true, 0.0); gestures.moveLevel(-20.0); gestures.finishGesture()
+                }
+                capture("gesture-brightness")
+                scenario.onActivity { activity ->
+                    val engine = activity.findViewById<PlayerView>(R.id.native_player).player!!
+                    engine.play()
+                    descendants(activity.window.decorView).filterIsInstance<PlayerGestureFrame>().single()
+                        .beginProgress(0.0, GesturePlaybackPosition(engine.currentPosition, engine.duration))
+                }
+                scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+                scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+                scenario.onActivity { assertTrue("切后台中断拖动后恢复原播放意图", it.findViewById<PlayerView>(R.id.native_player).player!!.playWhenReady) }
+            }
+        } finally {
+            settings.gesturesEnabled = originalGesturesEnabled
+            if (!audio.isVolumeFixed) audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, originalVolume, 0)
         }
     }
     private fun onMain(check: () -> Boolean): Boolean { var result = false; instrumentation.runOnMainSync { result = check() }; return result }

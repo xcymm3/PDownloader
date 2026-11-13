@@ -17,6 +17,9 @@ import android.widget.Toast
 import android.widget.TextView
 import android.os.Handler
 import android.os.Looper
+import android.media.AudioManager
+import android.provider.Settings
+import kotlin.math.roundToInt
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -36,6 +39,57 @@ import com.pdownloader.browser.media.*
 class PlayerActivity : ThemedActivity() {
     private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
+    private lateinit var gestures: PlayerGestureFrame
+    private var gestureSeekPlayer: ExoPlayer? = null
+    private var gestureWasPlaying = false
+    private var volumeWarningShown = false
+    private val audio by lazy { getSystemService(AudioManager::class.java) }
+    private val playbackSettings by lazy { PlaybackSettings(this) }
+    private val gestureHost = object : PlayerGestureHost {
+        override val gesturesEnabled get() = playbackSettings.gesturesEnabled && !controlsLocked && !backgroundPaused && player?.let {
+            it.playbackState != Player.STATE_IDLE && it.playerError == null
+        } == true
+        override fun playbackPosition() = player?.takeIf { canSeek }?.let { GesturePlaybackPosition(it.currentPosition, it.duration) }
+        override fun beginSeek() { beginGestureSeek() }
+        override fun seek(positionMs: Long) { seekToPosition(positionMs, remember = false) }
+        override fun endSeek() { endGestureSeek() }
+        override fun brightness(): Float {
+            val current = window.attributes.screenBrightness
+            return if (current >= 0) current.coerceIn(0f, 1f) else
+                (Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128) / 255f).coerceIn(0f, 1f)
+        }
+        override fun setBrightness(value: Float): Float {
+            val next = value.coerceIn(0f, 1f)
+            window.attributes = window.attributes.apply { screenBrightness = next }
+            return next
+        }
+        override fun volume(): Float {
+            val maximum = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+            return audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / maximum
+        }
+        override fun setVolume(value: Float): Float {
+            val maximum = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val minimum = if (Build.VERSION.SDK_INT >= 28) audio.getStreamMinVolume(AudioManager.STREAM_MUSIC) else 0
+            try {
+                val target = (value * maximum).roundToInt().coerceIn(minimum, maximum)
+                if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) != target) audio.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+            } catch (_: SecurityException) {
+                if (!volumeWarningShown) Toast.makeText(this@PlayerActivity, "设备限制了媒体音量调节", Toast.LENGTH_SHORT).show()
+                volumeWarningShown = true
+            }
+            return volume()
+        }
+        override fun togglePlayback(): Boolean {
+            val engine = player ?: return false
+            if (!engine.playWhenReady && engine.playbackState == Player.STATE_ENDED) engine.seekTo(0)
+            engine.playWhenReady = !engine.playWhenReady
+            play = engine.playWhenReady
+            return play
+        }
+        override fun toggleController() {
+            if (playerView.isControllerFullyVisible) playerView.hideController() else playerView.showController()
+        }
+    }
     private var position = 0L
     private var play = true
     private var task: com.pdownloader.browser.download.DownloadTask? = null
@@ -57,11 +111,16 @@ class PlayerActivity : ThemedActivity() {
     val playbackPositionMs: Long get() = player?.currentPosition ?: position
 
     @SuppressLint("SourceLockedOrientationActivity")
+    @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         play = savedInstanceState?.getBoolean("playing", true) ?: true
         playbackSpeed = savedInstanceState?.getFloat("speed", 1f) ?: 1f
+        savedInstanceState?.getFloat("brightness", -1f)?.takeIf { it >= 0 }?.let { value ->
+            window.attributes = window.attributes.apply { screenBrightness = value }
+        }
+        volumeControlStream = AudioManager.STREAM_MUSIC
         task = (savedInstanceState?.getString("task") ?: intent.getStringExtra("task"))?.let { DownloadRepository.get(this).get(it) }
             ?: (savedInstanceState?.getString("preview") ?: intent.getStringExtra("preview"))?.let { runCatching { DownloadRepository.decode(it) }.getOrNull() }
         if (task == null) { finish(); return }
@@ -76,9 +135,7 @@ class PlayerActivity : ThemedActivity() {
             }.getOrDefault(emptyList())
         }
         val layout = column().apply { setBackgroundColor(color(R.color.video_background)) }
-        @Suppress("DEPRECATION")
         window.statusBarColor = color(R.color.video_background)
-        @Suppress("DEPRECATION")
         window.navigationBarColor = color(R.color.video_background)
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
         layout.setOnApplyWindowInsetsListener { _, insets ->
@@ -107,7 +164,7 @@ class PlayerActivity : ThemedActivity() {
             navigation.add(button to next)
         }
         updateNavigation()
-        val gestures = SeekGestureFrame(this, read = { player?.takeIf { canSeek && !controlsLocked }?.let { SeekPosition(it.currentPosition, it.duration) } }, commit = { seekToPosition(it) })
+        gestures = PlayerGestureFrame(this, gestureHost)
         gestures.addView(playerView, android.widget.FrameLayout.LayoutParams(-1, -1))
         gestures.installHint()
         lockButton = BrowserIcon(this, "lock", "锁定播放控件") { setControlsLocked(!controlsLocked) }.apply {
@@ -172,14 +229,29 @@ class PlayerActivity : ThemedActivity() {
         }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
-    fun seekToPosition(positionMs: Long): Boolean {
+    fun seekToPosition(positionMs: Long, remember: Boolean = true): Boolean {
         val engine = player ?: return false
         if (!canSeek) return false
         val target = positionMs.coerceIn(0, engine.duration)
         if (kotlin.math.abs(engine.currentPosition - target) > 20) engine.seekTo(target)
         position = target
-        task?.let { memory.save(it, target) }
+        if (remember) task?.let { memory.save(it, target) }
         return true
+    }
+    internal fun beginGestureSeek() {
+        val engine = player?.takeIf { canSeek } ?: return
+        if (gestureSeekPlayer != null) return
+        gestureSeekPlayer = engine; gestureWasPlaying = engine.playWhenReady
+        engine.pause()
+    }
+    internal fun endGestureSeek() {
+        val engine = gestureSeekPlayer
+        gestureSeekPlayer = null
+        if (engine != null && player === engine) {
+            play = gestureWasPlaying
+            if (!backgroundPaused) engine.playWhenReady = gestureWasPlaying
+        }
+        savePosition()
     }
     private fun savePosition() {
         val selected = task ?: return
@@ -189,6 +261,7 @@ class PlayerActivity : ThemedActivity() {
     }
 
     internal fun setControlsLocked(value: Boolean) {
+        if (value) gestures.cancelGesture()
         controlsLocked = value
         playerView.useController = !value
         if (value) playerView.hideController() else playerView.showController()
@@ -235,6 +308,7 @@ class PlayerActivity : ThemedActivity() {
     internal fun switchVideo(next: Boolean) {
         val index = playlist.indexOfFirst { it.id == task?.id }
         val selected = playlist.getOrNull(index + if (next) 1 else -1)?.takeIf { index >= 0 } ?: return
+        gestures.cancelGesture()
         savePosition()
         playerView.player = null
         player?.release()
@@ -248,10 +322,18 @@ class PlayerActivity : ThemedActivity() {
     }
 
     override fun onPause() {
+        val intendedPlay = when {
+            gestureSeekPlayer != null -> gestureWasPlaying
+            else -> player?.playWhenReady ?: play
+        }
+        backgroundPaused = true
+        if (::gestures.isInitialized) {
+            gestures.cancelGesture()
+        }
         savePosition()
         main.removeCallbacks(remember)
-        player?.let { play = it.playWhenReady; it.pause() }
-        backgroundPaused = true
+        play = intendedPlay
+        player?.pause()
         super.onPause()
     }
     override fun onResume() {
@@ -267,11 +349,12 @@ class PlayerActivity : ThemedActivity() {
         val savedPosition = if (player?.playbackState == Player.STATE_ENDED) 0 else player?.currentPosition ?: position
         outState.putLong("position", savedPosition); outState.putBoolean("fullscreen", fullscreen)
         outState.putFloat("speed", playbackSpeed); outState.putBoolean("locked", controlsLocked)
+        outState.putFloat("brightness", window.attributes.screenBrightness)
         task?.let { selected ->
             if (selected.state == TaskState.COMPLETE) outState.putString("task", selected.id)
             else outState.putString("preview", DownloadRepository.encode(selected).toString())
         }
-        outState.putBoolean("playing", if (backgroundPaused) play else player?.playWhenReady ?: play)
+        outState.putBoolean("playing", if (gestureSeekPlayer != null) gestureWasPlaying else if (backgroundPaused) play else player?.playWhenReady ?: play)
         super.onSaveInstanceState(outState)
     }
     @Suppress("DEPRECATION")
