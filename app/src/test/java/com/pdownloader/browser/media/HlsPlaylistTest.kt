@@ -44,7 +44,7 @@ class HlsPlaylistTest {
     }
     @Test fun unsupportedListsAreExplicitlyRejected() {
         assertTrue(HlsPlaylist.parse("#EXTM3U\n#EXTINF:1,\na.ts", "https://example.com/list").blocked.contains("直播"))
-        assertTrue(HlsPlaylist.parse("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key\"\n#EXTINF:1,\na.ts\n#EXT-X-ENDLIST", "https://example.com/list").blocked.contains("加密"))
+        assertTrue(HlsPlaylist.parse("#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key\"\n#EXTINF:1,\na.ts\n#EXT-X-ENDLIST", "https://example.com/list").blocked.contains("加密"))
         assertThrows(IllegalArgumentException::class.java) { HlsPlaylist.parse("<html>not a playlist</html>", "https://example.com/list") }
         assertThrows(IllegalArgumentException::class.java) { HlsPlaylist.parse("#EXTM3U\n#EXTINF:1,\nfile:///secret\n#EXT-X-ENDLIST", "https://example.com/list") }
         assertThrows(IllegalArgumentException::class.java) { HlsPlaylist.parse("#EXTM3U\n#EXTINF:1,\n#EXT-X-BYTERANGE:20\nsegment.ts\n#EXT-X-ENDLIST", "https://example.com/list") }

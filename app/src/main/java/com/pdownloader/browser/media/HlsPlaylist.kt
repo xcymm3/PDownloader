@@ -1,8 +1,10 @@
 package com.pdownloader.browser.media
 
 import java.net.URI
+import java.math.BigInteger
 
-data class HlsPart(val url: String, val length: Long = -1, val offset: Long = 0)
+data class HlsEncryption(val keyUrl: String, val ivHex: String, val keyIndex: Int)
+data class HlsPart(val url: String, val length: Long = -1, val offset: Long = 0, val encryption: HlsEncryption? = null)
 data class HlsDocument(
     val variants: List<MediaVariant> = emptyList(),
     val parts: List<HlsPart> = emptyList(),
@@ -11,8 +13,9 @@ data class HlsDocument(
     val durationMs: Long = 0
 )
 
-/** A conservative offline VOD parser. Never concatenates containers or fetches DRM keys. */
+/** Offline VOD parser. Ordinary identity AES-128 is supported; other protection stays blocked. */
 object HlsPlaylist {
+    private const val UNSUPPORTED_ENCRYPTION = "暂不支持加密 HLS 或 DRM 媒体"
     fun attributes(line: String): Map<String, String> = Regex("([A-Z0-9-]+)=(\"[^\"]*\"|[^,]*)")
         .findAll(line.substringAfter(':', "")).associate { it.groupValues[1] to it.groupValues[2].trim('"') }
 
@@ -21,8 +24,15 @@ object HlsPlaylist {
         require(lines.firstOrNull() == "#EXTM3U") { "地址没有返回有效的 HLS 清单" }
         require(lines.size <= 20000) { "播放清单过大" }
         fun absolute(path: String): String = URI(baseUrl).resolve(path).toString().also { require(webUrl(it)) { "清单含不支持的资源地址" } }
-        if (lines.any { it.startsWith("#EXT-X-SESSION-KEY") || (it.startsWith("#EXT-X-KEY:") && attributes(it)["METHOD"] != "NONE") }) {
-            return HlsDocument(blocked = "暂不支持加密 HLS 或 DRM 媒体")
+        if (lines.filter { it.startsWith("#EXT-X-SESSION-KEY") || it.startsWith("#EXT-X-KEY:") }.any { line ->
+            val attrs = attributes(line)
+            if (attrs["METHOD"] == "NONE" && line.startsWith("#EXT-X-KEY:")) false
+            else attrs["METHOD"] != "AES-128" || attrs.getOrDefault("KEYFORMAT", "identity") != "identity" ||
+                attrs.getOrDefault("KEYFORMATVERSIONS", "1") != "1" ||
+                attrs["URI"].isNullOrBlank() || runCatching { absolute(attrs.getValue("URI")) }.isFailure ||
+                attrs["IV"]?.let { !Aes128Hls.validIv(it) } == true
+        }) {
+            return HlsDocument(blocked = UNSUPPORTED_ENCRYPTION)
         }
         if (lines.any { it.startsWith("#EXT-X-STREAM-INF:") }) {
             val separateAudio = lines.filter { it.startsWith("#EXT-X-MEDIA:") }
@@ -48,12 +58,20 @@ object HlsPlaylist {
         var previousEnd = 0L
         var previousUrl = ""
         var duration = 0.0
+        var keyUrl: String? = null
+        var explicitIv: String? = null
+        var keyIndex = 0
+        val sequenceText = lines.firstOrNull { it.startsWith("#EXT-X-MEDIA-SEQUENCE:") }?.substringAfter(':')
+        var sequence = if (sequenceText == null) BigInteger.ZERO else
+            requireNotNull(sequenceText.toBigIntegerOrNull()) { "地址没有返回有效的 HLS 清单" }
+        require(sequence.signum() >= 0 && sequence.bitLength() <= 64) { "地址没有返回有效的 HLS 清单" }
         fun addPart(url: String, spec: String?): String {
             val length = spec?.substringBefore('@')?.toLongOrNull() ?: -1
             val offset = if (spec != null) spec.substringAfter('@', "").toLongOrNull()
                 ?: previousEnd.also { require(previousUrl == url) { "字节范围缺少有效的前置偏移" } } else 0L
             require(spec == null || length > 0 && offset >= 0 && offset <= Long.MAX_VALUE - length) { "无效字节范围" }
-            parts.add(HlsPart(url, length, offset))
+            val encryption = keyUrl?.let { key -> HlsEncryption(key, explicitIv ?: Aes128Hls.sequenceIv(sequence), keyIndex) }
+            parts.add(HlsPart(url, length, offset, encryption))
             previousEnd = if (length > 0) offset + length else 0
             previousUrl = url
             require(parts.size <= 5000) { "点播分片超过 5000 个，请缩短视频范围" }
@@ -64,12 +82,23 @@ object HlsPlaylist {
                 line.startsWith("#EXT-X-BYTERANGE:") -> range = line.substringAfter(':')
                 line.startsWith("#EXT-X-MAP:") -> {
                     val attrs = attributes(line)
+                    if (keyUrl != null && explicitIv == null) return HlsDocument(blocked = UNSUPPORTED_ENCRYPTION)
                     val path = addPart(absolute(attrs["URI"] ?: error("初始化片段缺少地址")), attrs["BYTERANGE"])
                     local.add("#EXT-X-MAP:URI=\"$path\"")
                 }
-                !line.startsWith('#') -> { local.add(addPart(absolute(line), range)); range = null }
+                !line.startsWith('#') -> {
+                    require(sequence.bitLength() <= 64) { "地址没有返回有效的 HLS 清单" }
+                    local.add(addPart(absolute(line), range)); range = null
+                    sequence += BigInteger.ONE
+                }
                 line.startsWith("#EXTINF:") -> { duration += line.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0; local.add(line) }
-                line.startsWith("#EXT-X-KEY:") || line.startsWith("#EXT-X-RENDITION-REPORT:") -> Unit
+                line.startsWith("#EXT-X-KEY:") -> {
+                    val attrs = attributes(line)
+                    keyIndex++
+                    keyUrl = if (attrs["METHOD"] == "NONE") null else absolute(attrs.getValue("URI"))
+                    explicitIv = if (keyUrl == null) null else attrs["IV"]?.let(Aes128Hls::normalizeIv)
+                }
+                line.startsWith("#EXT-X-RENDITION-REPORT:") -> Unit
                 else -> if (line == "#EXTM3U" || listOf("#EXT-X-VERSION:", "#EXT-X-TARGETDURATION:", "#EXT-X-MEDIA-SEQUENCE:", "#EXT-X-DISCONTINUITY", "#EXT-X-PLAYLIST-TYPE:", "#EXT-X-ENDLIST", "#EXT-X-INDEPENDENT-SEGMENTS", "#EXT-X-PROGRAM-DATE-TIME:").any(line::startsWith)) local.add(line)
             }
         }

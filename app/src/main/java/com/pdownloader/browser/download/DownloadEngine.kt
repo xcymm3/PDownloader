@@ -145,18 +145,43 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         require(playlist.variants.isEmpty()) { "请选择具体清晰度后再下载" }
         val folder = repository.folder(id)
         val fingerprint = File(folder, "playlist.fingerprint")
-        val identity = stableId(url + text)
+        val identity = stableId((if (playlist.parts.any { it.encryption != null }) "aes128-v1\n" else "") + url + text)
         if (!fingerprint.exists() || fingerprint.readText() != identity) {
             folder.listFiles()?.filter { it.name.startsWith("part-") || it.name.endsWith(".m3u8") }?.forEach { it.delete() }
             fingerprint.writeText(identity)
         }
         var copied = 0L
+        val keys = mutableMapOf<Pair<Int, String>, ByteArray>()
+        fun keyFor(encryption: HlsEncryption): ByteArray = keys.getOrPut(encryption.keyIndex to encryption.keyUrl) {
+            check(id)
+            http.open(encryption.keyUrl, task.context).use { response ->
+                MediaHttp.requireSuccess(response.status)
+                val data = ByteArray(17)
+                var length = 0
+                response.body.use { input ->
+                    while (length < data.size) {
+                        check(id)
+                        val count = input.read(data, length, data.size - length)
+                        if (count < 0) break
+                        length += count
+                    }
+                }
+                if (length != 16) {
+                    data.fill(0)
+                    throw SourceUnavailable("分片地址未返回媒体，请回原页重新检测")
+                }
+                data.copyOf(16).also { data.fill(0) }
+            }
+        }
         change(id) { it.copy(state = TaskState.DOWNLOADING, total = -1, partsTotal = playlist.parts.size, partsDone = 0) }
-        playlist.parts.forEachIndexed { index, part ->
+        try { playlist.parts.forEachIndexed { index, part ->
             check(id)
             val target = File(folder, "part-$index.bin")
             if (!target.exists() || target.length() == 0L) {
                 val partial = File(folder, "part-$index.part")
+                val decryptor = part.encryption?.let { encryption ->
+                    Aes128Hls.decryptor(keyFor(encryption), encryption.ivHex)
+                }
                 val headers = if (part.length > 0) mapOf("Range" to "bytes=${part.offset}-${part.offset + part.length - 1}") else emptyMap()
                 http.open(part.url, task.context, headers = headers).use { response ->
                     MediaHttp.requireSuccess(response.status)
@@ -168,27 +193,38 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
                         require(response.status == 206 && start == part.offset) { "分片服务器不支持所需字节范围" }
                     }
                     var count = 0L
+                    var written = 0L
                     partial.outputStream().use { output -> response.body.use { input ->
                         val buffer = ByteArray(64 * 1024)
                         while (true) {
                             check(id)
                             val size = input.read(buffer)
                             if (size < 0) break
-                            output.write(buffer, 0, size); count += size
+                            count += size
                             require(part.length < 0 || count <= part.length) { "分片长度超过请求范围" }
-                            report(id) { it.copy(downloaded = copied + count) }
+                            if (decryptor == null) {
+                                output.write(buffer, 0, size); written += size
+                            } else decryptor.update(buffer, 0, size)?.let { plain -> output.write(plain); written += plain.size }
+                            report(id) { it.copy(downloaded = copied + written) }
+                        }
+                        if (count <= 0 || part.length >= 0 && count != part.length || response.length >= 0 && response.length != count) {
+                            throw IOException("分片传输不完整，请继续下载")
+                        }
+                        if (decryptor != null) {
+                            val tail = try { decryptor.doFinal() } catch (_: java.security.GeneralSecurityException) {
+                                throw SourceUnavailable("分片地址未返回媒体，请回原页重新检测")
+                            }
+                            output.write(tail); written += tail.size
+                            if (written == 0L) throw SourceUnavailable("分片地址未返回媒体，请回原页重新检测")
                         }
                     } }
-                    if (count <= 0 || part.length >= 0 && count != part.length || response.length >= 0 && response.length != count) {
-                        throw IOException("分片传输不完整，请继续下载")
-                    }
                     check(id)
                     require(partial.renameTo(target)) { "无法保存分片" }
                 }
             }
             copied += target.length()
             change(id) { it.copy(downloaded = copied, partsDone = index + 1) }
-        }
+        } } finally { keys.values.forEach { it.fill(0) } }
         check(id)
         change(id) { it.copy(state = TaskState.PROCESSING) }
         val output = File(folder, "offline.m3u8")

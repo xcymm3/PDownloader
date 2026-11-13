@@ -9,6 +9,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
+data class FixtureResponse(val body: ByteArray, val mime: String = "application/octet-stream", val status: Int = 200, val headers: String = "")
+
 /** Debug-only loopback fixture server. Not packaged in release builds. */
 class FixtureServer(private val context: Context) : Closeable {
     private val server = ServerSocket(0, 20, InetAddress.getByName("127.0.0.1"))
@@ -18,6 +20,7 @@ class FixtureServer(private val context: Context) : Closeable {
     val requests = CopyOnWriteArrayList<Pair<String, Map<String, String>>>()
     @Volatile var rejectSegment = false
     @Volatile var beforeSlowBody: ((String) -> Unit)? = null
+    @Volatile var customResponse: ((String, Map<String, String>) -> FixtureResponse?)? = null
     init {
         workers.execute {
             while (running) {
@@ -45,10 +48,11 @@ class FixtureServer(private val context: Context) : Closeable {
             headers[line.substringBefore(':').lowercase()] = line.substringAfter(':').trim()
         }
         requests.add(path to headers)
-        var status = 200
-        var mime = "video/mp4"
-        var extra = "ETag: \"fixture-v1\"\r\nAccept-Ranges: bytes\r\n"
-        val body = when {
+        val custom = customResponse?.invoke(first[1], headers)
+        var status = custom?.status ?: 200
+        var mime = custom?.mime ?: "video/mp4"
+        var extra = "ETag: \"fixture-v1\"\r\nAccept-Ranges: bytes\r\n" + custom?.headers.orEmpty()
+        val body = custom?.body ?: when {
             path == "/" -> { mime = "text/html; charset=utf-8"; page().toByteArray() }
             path in setOf("/nav-one", "/nav-two") -> {
                 mime = "text/html"
@@ -105,7 +109,7 @@ class FixtureServer(private val context: Context) : Closeable {
             path == "/playlist" -> { mime = "application/vnd.apple.mpegurl"; context.assets.open("media-fixture/media.m3u8").use { it.readBytes() } }
             path == "/fake.m3u8" -> { mime = "text/html"; "<html>not a playlist</html>".toByteArray() }
             path == "/live.m3u8" -> { mime = "application/vnd.apple.mpegurl"; "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsegment-000.ts\n".toByteArray() }
-            path == "/encrypted.m3u8" -> { mime = "application/vnd.apple.mpegurl"; "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"secret.key\"\n#EXTINF:1,\nsegment-000.ts\n#EXT-X-ENDLIST\n".toByteArray() }
+            path == "/encrypted.m3u8" -> { mime = "application/vnd.apple.mpegurl"; "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"secret.key\"\n#EXTINF:1,\nsegment-000.ts\n#EXT-X-ENDLIST\n".toByteArray() }
             path == "/segment-001.ts" && rejectSegment -> { status = 503; ByteArray(0) }
             else -> {
                 val name = if (path in setOf("/protected.mp4", "/slow.mp4", "/ignore-range.mp4")) "sample.mp4" else path.removePrefix("/")
