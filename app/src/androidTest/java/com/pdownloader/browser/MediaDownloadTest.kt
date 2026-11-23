@@ -44,6 +44,33 @@ class MediaDownloadTest {
     private fun enqueue(path: String, kind: MediaKind = MediaKind.VIDEO): DownloadTask = repository.enqueue("测试媒体", MediaVariant(server.base + path, kind), RequestContext(server.base + "/", "FixtureAgent")).first.also { ids.add(it.id) }
     private fun sample() = context.assets.open("media-fixture/sample.mp4").use { it.readBytes() }
 
+    @Test fun largeFilesDownloadConcurrentlyAndFallBackWhenRangesAreIgnored() {
+        val content = ByteArray(13 * 1024 * 1024) { ((it / 32768) xor it).toByte() }
+        val concurrentRequests = CountDownLatch(3)
+        server.customResponse = { path, headers ->
+            val range = headers["range"]
+            if (path == "/parallel.mp4" && range != null) {
+                concurrentRequests.countDown()
+                check(concurrentRequests.await(5, TimeUnit.SECONDS)) { "分片请求没有并行执行" }
+                assertEquals("\"fixture-v1\"", headers["if-range"])
+                val from = range.substringAfter('=').substringBefore('-').toInt()
+                val to = range.substringAfter('-').toInt()
+                FixtureResponse(content.copyOfRange(from, to + 1), "video/mp4", 206,
+                    "Content-Range: bytes $from-$to/${content.size}\r\n")
+            } else FixtureResponse(content, "video/mp4")
+        }
+        for (path in listOf("/parallel.mp4", "/ignore-range.mp4")) {
+            val task = enqueue(path)
+            engine.run(task.id)
+            val completed = repository.get(task.id)!!
+            assertEquals(completed.error, TaskState.COMPLETE, completed.state)
+            assertArrayEquals(content, File(repository.folder(task.id), completed.output).readBytes())
+            assertTrue(server.requests.any { it.first == path && it.second["range"] != null })
+        }
+        assertEquals(0L, concurrentRequests.count)
+        assertTrue(server.requests.count { it.first == "/ignore-range.mp4" && it.second["range"] == null } >= 2)
+    }
+
     @Test fun dashDownloadsBothTracksAndMakesOnePlayableMp4() {
         val testAssets = instrumentation.context.assets
         val video = testAssets.open("media-fixture/dash-video.mp4").use { it.readBytes() }

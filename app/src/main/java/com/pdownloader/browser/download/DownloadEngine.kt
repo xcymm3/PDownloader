@@ -117,7 +117,7 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         }
     }
 
-    private fun file(id: String) {
+    private fun file(id: String, allowParallel: Boolean = true) {
         val task = repository.get(id) ?: throw Stopped()
         val folder = repository.folder(id)
         val partial = File(folder, "transfer.part")
@@ -150,6 +150,28 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
             val total = if (response.status == 206) response.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1 else response.length
             val validator = response.header("ETag")?.takeUnless { it.startsWith("W/") } ?: response.header("Last-Modified") ?: ""
             require(offset == 0L || validator == task.validator) { "远程文件发生变化，请取消后重新下载" }
+            val mimeVariant = task.variant.copy(mime = specificMime(response.mime) ?: task.variant.mime.ifBlank { response.mime })
+            val strongValidator = ParallelFileTransfer.validator(response)
+            if (allowParallel && offset == 0L && response.status == 200 && task.variant.kind != MediaKind.IMAGE &&
+                total >= ParallelFileTransfer.MIN_SIZE && strongValidator != null && ParallelFileTransfer.slots.tryAcquire()
+            ) {
+                try {
+                    val resolved = response.url
+                    response.close()
+                    change(id) { it.copy(state = TaskState.DOWNLOADING, total = total, downloaded = 0, validator = "") }
+                    val matched = ParallelFileTransfer(http).download(task.variant.url, resolved, task.context, partial,
+                        total, strongValidator, { check(id) }) { count ->
+                        report(id) { it.copy(downloaded = maxOf(it.downloaded, count)) }
+                    }
+                    if (matched) {
+                        change(id) { it.copy(state = TaskState.PROCESSING, downloaded = total) }
+                        finishFile(id, task, partial, mimeVariant, total)
+                    } else file(id, allowParallel = false)
+                    return
+                } finally {
+                    ParallelFileTransfer.slots.release()
+                }
+            }
             change(id) { it.copy(state = TaskState.DOWNLOADING, total = total, downloaded = offset, validator = validator) }
             var copied = offset
             partial.outputStreamAppend(offset > 0).use { output ->
@@ -167,24 +189,29 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
             if (!((copied > 0 || task.variant.kind == MediaKind.OTHER && total == 0L) && (total < 0 || copied == total))) {
                 throw IOException("传输不完整，请继续下载")
             }
-            check(id)
-            val mimeVariant = task.variant.copy(mime = specificMime(response.mime) ?: task.variant.mime.ifBlank { response.mime })
-            val name = if (task.variant.kind == MediaKind.OTHER) otherFileName(task.title) else safeFileName(task.title, extension(mimeVariant))
-            val output = File(folder, name)
-            val completed: (DownloadTask) -> DownloadTask = {
-                it.copy(state = TaskState.COMPLETE, downloaded = copied, total = copied, output = output.name, variant = mimeVariant, error = "")
-            }
-            if (task.saveToPublic) {
-                val mime = specificMime(mimeVariant.mime)
-                    ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(output.extension)
-                    ?: "application/octet-stream"
-                publish(id, partial, output.name, mime, completed)
-                partial.delete()
-            } else change(id) {
-                require(partial.renameTo(output)) { "无法发布下载文件，请检查存储空间" }
-                completed(it)
-            }
+            finishFile(id, task, partial, mimeVariant, copied)
         }
+    }
+
+    private fun finishFile(id: String, task: DownloadTask, partial: File, variant: MediaVariant, copied: Long) {
+        check(id)
+        val name = if (variant.kind == MediaKind.OTHER) otherFileName(task.title) else safeFileName(task.title, extension(variant))
+        val folder = repository.folder(id)
+        val output = File(folder, name)
+        val completed: (DownloadTask) -> DownloadTask = {
+            it.copy(state = TaskState.COMPLETE, downloaded = copied, total = copied, output = name, variant = variant, error = "")
+        }
+        if (task.saveToPublic) {
+            val mime = specificMime(variant.mime)
+                ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(output.extension)
+                ?: "application/octet-stream"
+            publish(id, partial, name, mime, completed)
+            partial.delete()
+        } else change(id) {
+            require(partial == output || partial.renameTo(output)) { "无法发布下载文件，请检查存储空间" }
+            completed(it)
+        }
+        if (repository.get(id)?.state == TaskState.COMPLETE) runCatching { ParallelFileTransfer.clear(folder, keep = output) }
     }
 
     private fun validRange(response: MediaHttp.Response, task: DownloadTask, offset: Long): Boolean {
@@ -401,7 +428,7 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
     private fun change(id: String, transform: (DownloadTask) -> DownloadTask) {
         repository.update(id) { if (!stopped() && it.state in transferStates) transform(it) else it }
     }
-    private fun report(id: String, transform: (DownloadTask) -> DownloadTask) {
+    @Synchronized private fun report(id: String, transform: (DownloadTask) -> DownloadTask) {
         val now = System.currentTimeMillis()
         if (now - lastProgress > 600) { lastProgress = now; change(id, transform) }
     }
