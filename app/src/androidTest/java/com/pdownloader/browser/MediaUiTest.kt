@@ -41,6 +41,33 @@ class MediaUiTest {
     }
     private fun task(path: String, kind: MediaKind): DownloadTask = repository.enqueue("界面回归", MediaVariant(server.base + path, kind), RequestContext(server.base + "/", "UI-Test")).first.also { ids.add(it.id) }
 
+    @Test fun downloadedVideoCoverSkipsTheBlackIntro() {
+        val video = instrumentation.context.assets.open("media-fixture/black-intro.mp4").use { it.readBytes() }
+        server.customResponse = { path, _ -> if (path == "/black-intro.mp4") FixtureResponse(video, "video/mp4") else null }
+        val task = task("/black-intro.mp4", MediaKind.VIDEO)
+        DownloadEngine(repository, MediaHttp(allowLocalTests = true)).run(task.id)
+        val completed = requireNotNull(repository.get(task.id))
+        assertEquals(TaskState.COMPLETE, completed.state)
+        val images = MediaImages()
+        val result = java.util.concurrent.CountDownLatch(1)
+        var bitmap: android.graphics.Bitmap? = null
+        try {
+            instrumentation.runOnMainSync {
+                val view = ImageView(context)
+                images.loadDownloaded(view, completed, repository.folder(task.id)) {
+                    bitmap = (view.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
+                    result.countDown()
+                }
+            }
+            assertTrue(result.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            val cover = requireNotNull(bitmap)
+            val pixels = (1..8).map { cover.getPixel(cover.width * it / 10, cover.height / 4) }
+            assertTrue(pixels.toSet().size >= 4)
+        } finally {
+            instrumentation.runOnMainSync { images.close() }
+        }
+    }
+
     @Test fun filtersShowExactlyOneSelectedCategoryAndTheMatchingFiles() {
         val video = task("/sample.mp4", MediaKind.VIDEO)
         val photo = task("/picture.png", MediaKind.IMAGE)
