@@ -37,7 +37,11 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
                 check(id)
                 change(id) { it.copy(state = TaskState.CONNECTING, error = "") }
                 try {
-                    if (task.variant.kind == MediaKind.HLS) hls(id) else file(id)
+                    when {
+                        task.variant.kind == MediaKind.HLS -> hls(id)
+                        task.variant.audioUrl.isNotBlank() -> splitVideo(id, task)
+                        else -> file(id)
+                    }
                     break
                 } catch (error: Exception) {
                     val retryable = error is java.net.SocketTimeoutException || error is java.net.SocketException || error is java.net.UnknownHostException || error is MediaHttp.HttpFailure && error.code in setOf(500, 502, 503, 504)
@@ -53,6 +57,63 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
             change(id) { it.copy(state = TaskState.FAILED, failure = failure(error), error = message(error)) }
         } finally {
             if (repository.get(id)?.state in setOf(null, TaskState.CANCELLED)) repository.folder(id).deleteRecursively()
+        }
+    }
+
+    private fun splitVideo(id: String, task: DownloadTask) {
+        val folder = repository.folder(id)
+        val video = File(folder, "video-track.bin")
+        val audio = File(folder, "audio-track.bin")
+        change(id) { it.copy(state = TaskState.DOWNLOADING, downloaded = 0, total = -1, partsDone = 0, partsTotal = 2) }
+        downloadTrack(id, task.variant.url, task.context.forTrack(task.variant.url), video, "video", 0)
+        change(id) { it.copy(downloaded = video.length(), partsDone = 1) }
+        downloadTrack(id, task.variant.audioUrl, task.context.forTrack(task.variant.audioUrl), audio, "audio", video.length())
+        change(id) { it.copy(state = TaskState.PROCESSING, downloaded = video.length() + audio.length(), partsDone = 2) }
+        val mp4 = File(folder, "merged-output.part")
+        try {
+            Mp4Output.write(video, audio, mp4, task.durationMs) { check(id) }
+            finishMp4(id, task, mp4)
+            if (repository.get(id)?.state == TaskState.COMPLETE) {
+                video.delete()
+                audio.delete()
+            }
+        } finally {
+            mp4.delete()
+        }
+    }
+
+    private fun downloadTrack(id: String, url: String, context: RequestContext, target: File, type: String, previous: Long) {
+        check(id)
+        if (target.isFile && target.length() > 0) return
+        val temporary = File(target.parentFile, "${target.name}.part")
+        try {
+            http.open(url, context).use { response ->
+                MediaHttp.requireSuccess(response.status)
+                val mime = specificMime(response.mime)
+                val validType = mime == null || mime == "application/mp4" || mime.startsWith("$type/") ||
+                    type == "audio" && mime == "video/mp4"
+                if (response.status != 200 || !validType) throw SourceUnavailable("服务器未返回完整的音视频轨道，请回原页重新检测")
+                val length = response.length
+                var copied = 0L
+                response.body.use { input ->
+                    temporary.outputStream().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            check(id)
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            copied += count
+                            report(id) { it.copy(downloaded = previous + copied) }
+                        }
+                    }
+                }
+                if (copied <= 0 || length >= 0 && copied != length) throw IOException("音视频轨道传输不完整")
+            }
+            check(id)
+            require(temporary.renameTo(target)) { "无法保存音视频轨道" }
+        } finally {
+            temporary.delete()
         }
     }
 
@@ -227,6 +288,19 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
         } } finally { keys.values.forEach { it.fill(0) } }
         check(id)
         change(id) { it.copy(state = TaskState.PROCESSING) }
+        val mp4 = File(folder, "merged-output.part")
+        try {
+            if (mergeHls(id, folder, playlist, mp4)) {
+                finishMp4(id, task, mp4)
+                if (repository.get(id)?.state == TaskState.COMPLETE) {
+                    playlist.parts.indices.forEach { File(folder, "part-$it.bin").delete() }
+                    fingerprint.delete()
+                }
+                return
+            }
+        } finally {
+            mp4.delete()
+        }
         val output = File(folder, "offline.m3u8")
         val temporary = File(folder, "offline.tmp")
         temporary.writeText(playlist.localLines.joinToString("\n", postfix = "\n"))
@@ -245,6 +319,52 @@ class DownloadEngine(private val repository: DownloadRepository, private val htt
             }
         } else change(id) {
             require(temporary.renameTo(output)) { "离线清单整理失败" }
+            completed(it)
+        }
+    }
+
+    private fun mergeHls(id: String, folder: File, playlist: HlsDocument, mp4: File): Boolean {
+        if (playlist.durationMs <= 0 || playlist.localLines.any { it == "#EXT-X-DISCONTINUITY" } ||
+            playlist.localLines.count { it.startsWith("#EXT-X-MAP:") } > 1) return false
+        val stream = File(folder, "hls-input.part")
+        return try {
+            stream.outputStream().buffered().use { output ->
+                playlist.parts.indices.forEach { index ->
+                    File(folder, "part-$index.bin").inputStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            check(id)
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+            }
+            Mp4Output.write(stream, null, mp4, playlist.durationMs) { check(id) }
+            true
+        } catch (stopped: Stopped) {
+            throw stopped
+        } catch (_: IOException) {
+            false
+        } catch (_: IllegalArgumentException) {
+            false
+        } catch (_: IllegalStateException) {
+            false
+        } finally {
+            stream.delete()
+        }
+    }
+
+    private fun finishMp4(id: String, task: DownloadTask, source: File) {
+        val name = safeFileName(task.title, "mp4")
+        val size = source.length()
+        val completed: (DownloadTask) -> DownloadTask = {
+            it.copy(state = TaskState.COMPLETE, output = name, downloaded = size, total = size, error = "")
+        }
+        if (task.saveToPublic) publish(id, source, name, "video/mp4", completed)
+        else change(id) {
+            require(source.renameTo(File(repository.folder(id), name))) { "无法保存 MP4，请检查存储空间" }
             completed(it)
         }
     }

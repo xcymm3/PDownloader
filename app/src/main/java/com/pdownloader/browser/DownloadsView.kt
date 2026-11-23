@@ -153,7 +153,7 @@ class DownloadsView(
             body.addView(titleRow)
             val duration = if (task.durationMs >= 0) " · ${task.durationMs / 60000}:${(task.durationMs / 1000 % 60).toString().padStart(2, '0')}" else ""
             val format = when (task.variant.kind) {
-                MediaKind.HLS -> "HLS 离线资源包"
+                MediaKind.HLS -> "HLS 视频"
                 MediaKind.OTHER -> task.title.substringAfterLast('.', "").uppercase().ifBlank { "文件" }
                 else -> extension(task.variant).uppercase()
             }

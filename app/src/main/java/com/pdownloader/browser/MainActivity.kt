@@ -908,6 +908,7 @@ class MainActivity : ThemedActivity() {
         if (mediaSheet?.isShowing() == true) return
         hideKeyboard()
         showResourceSheet(session, imagesFirst, recoveryFor(session.pageUrl), ::rescan)
+        siteAdapters.match(session.pageUrl)?.let { probe.scanSite(session, it) }
     }
 
     private fun showResourceSheet(session: ProbeSession, imagesFirst: Boolean, recovery: DownloadTask?, retry: () -> Unit, shared: Boolean = false) {
@@ -956,7 +957,7 @@ class MainActivity : ThemedActivity() {
 
     private fun confirmRecovery(task: DownloadTask, group: MediaGroup, variant: MediaVariant) {
         val context = variant.requestContext ?: group.context
-        val message = if (variant.url == task.variant.url && variant.kind == task.variant.kind) "会校验原断点或分片，再继续「${task.title}」。"
+        val message = if (variant.id == task.variant.id) "会校验原断点或分片，再继续「${task.title}」。"
             else "将用选中的资源继续原任务「${task.title}」。地址或格式已变化，下载会从头开始。"
         AlertDialog.Builder(this).setTitle("恢复原下载任务？").setMessage(message)
             .setNegativeButton("取消", null)
@@ -1145,7 +1146,7 @@ class MainActivity : ThemedActivity() {
                         type = downloadMime(task)
                         putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         clipData = android.content.ClipData.newRawUri(task.title, uri)
-                    }, if (task.variant.kind == MediaKind.HLS) "分享 HLS 离线资源包（ZIP，非 MP4）" else "分享文件"))
+                    }, if (task.isHlsBundle) "分享 HLS 离线资源包（ZIP，非 MP4）" else "分享文件"))
                 }.onFailure { toast("无法分享文件，请检查本地文件和存储空间") }
             }
         }
@@ -1155,7 +1156,8 @@ class MainActivity : ThemedActivity() {
     }
 
     private fun downloadMime(task: DownloadTask): String =
-        if (task.variant.kind == MediaKind.HLS) "application/zip"
+        if (task.isHlsBundle) "application/zip"
+        else if (task.isMergedHls) "video/mp4"
         else specificMime(task.variant.mime)
             ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(task.output.substringAfterLast('.', "").lowercase())
             ?: when (task.variant.kind) {
@@ -1169,7 +1171,7 @@ class MainActivity : ThemedActivity() {
 
     private fun exportSource(task: DownloadTask): Uri {
         val repository = DownloadRepository.get(this)
-        if (task.variant.kind != MediaKind.HLS) return repository.playbackUri(task).also {
+        if (!task.isHlsBundle) return repository.playbackUri(task).also {
             require(canRead(it)) { "本地文件不存在" }
         }
         task.publicUri.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }?.takeIf(::canRead)?.let { return it }
@@ -1186,7 +1188,7 @@ class MainActivity : ThemedActivity() {
     }
     private fun exportDownloaded(task: DownloadTask) {
         exportTaskId = task.id
-        val hls = task.variant.kind == MediaKind.HLS
+        val hls = task.isHlsBundle
         if (hls) toast("HLS 将导出为离线资源包 ZIP，解压后可播放，非单个 MP4")
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -1194,7 +1196,7 @@ class MainActivity : ThemedActivity() {
             val name = if (task.variant.kind == MediaKind.OTHER) {
                 task.output.ifBlank { otherFileName(task.title) }
             } else {
-                safeFileName(task.title, if (hls) "zip" else extension(task.variant))
+                safeFileName(task.title, if (hls) "zip" else if (task.isMergedHls) "mp4" else extension(task.variant))
             }
             putExtra(Intent.EXTRA_TITLE, name)
         }, 701)

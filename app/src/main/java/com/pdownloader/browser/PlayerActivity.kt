@@ -28,6 +28,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.DefaultTimeBar
 import androidx.media3.ui.TimeBar
@@ -214,8 +215,18 @@ class PlayerActivity : ThemedActivity() {
             .setSeekBackIncrementMs(10000).setSeekForwardIncrementMs(10000).build().also { engine ->
             playerView.player = engine
             val item = MediaItem.Builder().setUri(uri)
-            if (selected.variant.kind == MediaKind.HLS) item.setMimeType(MimeTypes.APPLICATION_M3U8)
-            engine.setMediaItem(item.build()); engine.seekTo(position)
+            if (selected.isHlsBundle || !local && selected.variant.kind == MediaKind.HLS) item.setMimeType(MimeTypes.APPLICATION_M3U8)
+            val audioUrl = selected.variant.audioUrl
+            if (!local && audioUrl.isNotBlank()) {
+                val audioFactory = DefaultDataSource.Factory(this, DataSource.Factory {
+                    BrowserMediaSource(http, selected.context.forTrack(audioUrl))
+                })
+                engine.setMediaSource(MergingMediaSource(
+                    DefaultMediaSourceFactory(factory).createMediaSource(item.setMimeType(MimeTypes.VIDEO_MP4).build()),
+                    DefaultMediaSourceFactory(audioFactory).createMediaSource(MediaItem.fromUri(audioUrl))
+                ))
+            } else engine.setMediaItem(item.build())
+            engine.seekTo(position)
             engine.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_ENDED) memory.save(selected, 0)

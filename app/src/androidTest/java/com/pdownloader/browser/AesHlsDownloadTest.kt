@@ -77,6 +77,7 @@ class AesHlsDownloadTest {
             #EXTINF:1,
             segment-002.enc
             #EXT-X-KEY:METHOD=NONE
+            ${if (profile == "bundle") "#EXT-X-DISCONTINUITY" else ""}
             #EXTINF:1,
             segment-003.enc
             #EXT-X-ENDLIST
@@ -111,8 +112,8 @@ class AesHlsDownloadTest {
         val task = task()
         engine.run(task.id)
         val completed = repository.get(task.id)!!
-        assertPlainParts(completed)
-        assertEquals("", completed.error)
+        assertEquals(completed.error, TaskState.COMPLETE, completed.state)
+        assertTrue(completed.output, completed.isMergedHls)
         assertEquals(1, requestedUrls.count { it.startsWith("/aes/key-one") })
         assertTrue(requestedUrls.contains("/aes/key-one?sig=a%2Bb"))
         assertEquals(1, requestedUrls.count { it.startsWith("/aes/key-two") })
@@ -131,7 +132,9 @@ class AesHlsDownloadTest {
         reject.set(false)
         repository.update(task.id) { it.copy(state = TaskState.QUEUED) }
         engine.run(task.id)
-        assertPlainParts(repository.get(task.id)!!)
+        val completed = repository.get(task.id)!!
+        assertEquals(completed.error, TaskState.COMPLETE, completed.state)
+        assertTrue(completed.output, completed.isMergedHls)
         assertEquals(1, requestedUrls.count { it == "/aes/segment-000.enc" })
         assertEquals(1, requestedUrls.count { it.startsWith("/aes/key-one") })
     }
@@ -149,7 +152,7 @@ class AesHlsDownloadTest {
     }
     @androidx.test.filters.SdkSuppress(minSdkVersion = 29)
     @Test fun publicZipContainsOnlyOrdinaryPlayablePartsAndNoKeyReferences() {
-        configure()
+        configure("bundle")
         val task = task(public = true)
         engine.run(task.id)
         val completed = repository.get(task.id)!!
@@ -187,7 +190,8 @@ class AesHlsDownloadTest {
         val task = task()
         engine.run(task.id)
         val completed = repository.get(task.id)!!
-        assertPlainParts(completed, plain)
+        assertEquals(completed.error, TaskState.COMPLETE, completed.state)
+        assertTrue(completed.output, completed.isMergedHls)
         assertEquals(encrypted.size, server.requests.count { it.first == "/aes/bundle" && it.second["range"] != null })
         server.close()
         assertOfflineReady(repository.playbackUri(completed))

@@ -40,7 +40,7 @@ private fun bilibiliVideoPage(url: String): Pair<String, Int>? {
     return id to part
 }
 
-/** Uses Bilibili's first-party public web playback responses for progressive, single-file versions. */
+/** Uses Bilibili's first-party web playback responses for progressive and DASH versions. */
 internal class BilibiliAdapter(
     private val loadJson: (String, RequestContext) -> JSONObject,
     private val resolveShort: (String, RequestContext) -> String
@@ -95,17 +95,23 @@ internal class BilibiliAdapter(
             fun playback(quality: Int) = data(loadJson(
                 "$BILI_API/x/player/playurl?bvid=$bvid&cid=$cid&qn=$quality&fnval=0&platform=html5", context
             ))
-            val first = playback(64) ?: return fallback("未找到可直接下载的公开版本")
-            val lower = first.optJSONArray("accept_quality")?.let { values ->
+            val first = playback(64)
+            val lower = first?.optJSONArray("accept_quality")?.let { values ->
                 (0 until minOf(values.length(), 12)).map { values.optInt(it) }.filter { it in 1 until first.optInt("quality") }.minOrNull()
             }
             val versions = buildList {
-                progressive(first, context)?.let(::add)
+                first?.let { progressive(it, context) }?.let(::add)
                 if (lower != null && !Thread.currentThread().isInterrupted) {
                     runCatching { playback(lower)?.let { progressive(it, context) } }.getOrNull()?.let(::add)
                 }
             }.distinctBy { it.url }.distinctBy { it.height to it.quality }.toMutableList()
-            if (versions.isEmpty()) return fallback("该视频未提供单文件版本")
+            if (!Thread.currentThread().isInterrupted) {
+                val dash = runCatching {
+                    data(loadJson("$BILI_API/x/player/playurl?bvid=$bvid&cid=$cid&qn=80&fnval=16", context))
+                }.getOrNull()
+                if (dash != null) versions.addAll(dashVersions(dash, context))
+            }
+            if (versions.isEmpty()) return fallback("该视频未提供可下载版本")
             val cover = metadata.optString("pic").takeIf { webUrl(it) && host(it)?.endsWith(".hdslb.com") == true }.orEmpty()
             val duration = (entry?.optLong("duration") ?: metadata.optLong("duration")).takeIf { it in 1..86400 }?.times(1000) ?: -1
             val groups = mutableListOf(MediaGroup(stableId("bilibili:$bvid:$cid"), name, thumbnail = cover, durationMs = duration,
@@ -122,6 +128,28 @@ internal class BilibiliAdapter(
         } catch (_: Exception) {
             fallback("识别失败")
         }
+    }
+
+    private fun dashVersions(data: JSONObject, source: RequestContext): List<MediaVariant> {
+        if (data.optBoolean("is_preview") || data.optInt("is_preview") != 0) return emptyList()
+        val dash = data.optJSONObject("dash") ?: return emptyList()
+        fun streams(key: String): List<JSONObject> {
+            val array = dash.optJSONArray(key) ?: return emptyList()
+            return (0 until minOf(array.length(), 100)).mapNotNull(array::optJSONObject)
+        }
+        fun streamUrl(track: JSONObject) = track.optString("baseUrl").ifBlank { track.optString("base_url") }
+            .takeIf { url -> httpsHost(url)?.let { it.endsWith(".bilivideo.com") || it.endsWith(".bilivideo.cn") } == true }
+        val audio = streams("audio").filter { it.optString("codecs").startsWith("mp4a") }
+            .mapNotNull { track -> streamUrl(track)?.let { it to track.optLong("bandwidth") } }
+            .maxByOrNull { it.second }?.first ?: return emptyList()
+        return streams("video").filter { it.optString("codecs").startsWith("avc1") }
+            .sortedByDescending { it.optLong("bandwidth") }
+            .mapNotNull { track ->
+                val url = streamUrl(track) ?: return@mapNotNull null
+                val height = track.optInt("height").takeIf { it > 0 } ?: return@mapNotNull null
+                MediaVariant(url, MediaKind.VIDEO, "${height}p · 音视频合并", height, mime = "video/mp4",
+                    requestContext = source.copy(credentialOrigin = origin(url)), audioUrl = audio)
+            }.distinctBy { it.height }.sortedByDescending { it.height }
     }
 
     private fun progressive(data: JSONObject, source: RequestContext): MediaVariant? {

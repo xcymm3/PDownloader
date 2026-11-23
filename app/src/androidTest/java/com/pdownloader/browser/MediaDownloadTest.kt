@@ -44,6 +44,42 @@ class MediaDownloadTest {
     private fun enqueue(path: String, kind: MediaKind = MediaKind.VIDEO): DownloadTask = repository.enqueue("测试媒体", MediaVariant(server.base + path, kind), RequestContext(server.base + "/", "FixtureAgent")).first.also { ids.add(it.id) }
     private fun sample() = context.assets.open("media-fixture/sample.mp4").use { it.readBytes() }
 
+    @Test fun dashDownloadsBothTracksAndMakesOnePlayableMp4() {
+        val testAssets = instrumentation.context.assets
+        val video = testAssets.open("media-fixture/dash-video.mp4").use { it.readBytes() }
+        val audio = testAssets.open("media-fixture/dash-audio.mp4").use { it.readBytes() }
+        val audioAvailable = java.util.concurrent.atomic.AtomicBoolean(false)
+        server.customResponse = { path, _ ->
+            when (path) {
+                "/dash-video.mp4" -> FixtureResponse(video, "video/mp4")
+                "/dash-audio.mp4" -> if (audioAvailable.get()) FixtureResponse(audio, "audio/mp4")
+                    else FixtureResponse(ByteArray(0), status = 404)
+                else -> null
+            }
+        }
+        val asset = MediaVariant(server.base + "/dash-video.mp4", MediaKind.VIDEO, mime = "video/mp4",
+            audioUrl = server.base + "/dash-audio.mp4")
+        val task = repository.enqueue("分离音视频", asset, RequestContext(server.base, "FixtureAgent"), durationMs = 4000)
+            .first.also { ids.add(it.id) }
+        engine.run(task.id)
+        assertEquals(TaskState.FAILED, repository.get(task.id)?.state)
+        assertTrue(repository.get(task.id)?.output.isNullOrEmpty())
+        audioAvailable.set(true)
+        repository.update(task.id) { it.copy(state = TaskState.QUEUED) }
+        engine.run(task.id)
+        val completed = repository.get(task.id)!!
+        assertEquals(completed.error, TaskState.COMPLETE, completed.state)
+        assertEquals(1, server.requests.count { it.first == "/dash-video.mp4" })
+        val output = File(repository.folder(task.id), completed.output)
+        val extractor = android.media.MediaExtractor()
+        try {
+            extractor.setDataSource(output.path)
+            assertEquals(setOf("video/avc", "audio/mp4a-latm"), (0 until extractor.trackCount)
+                .map { extractor.getTrackFormat(it).getString(android.media.MediaFormat.KEY_MIME) }.toSet())
+        } finally { extractor.release() }
+        assertOfflineReady(output)
+    }
+
     @Test fun directDownloadIsByteExactAndDuplicateDoesNotCreateAnotherTask() {
         val task = enqueue("/sample.mp4")
         val duplicate = repository.enqueue(task.title, task.variant, task.context)
@@ -132,16 +168,18 @@ class MediaDownloadTest {
             settings.parallelDownloads = previousLimit
         }
     }
-    @Test fun nativePlayerFullscreenUsesLandscapeAndRestoresItsToolbar() {
+    @Test fun nativePlayerFullscreenUsesLandscapeAndRestoresItsOrientation() {
         val task = enqueue("/sample.mp4")
         ActivityScenario.launch<PlayerActivity>(Intent(context, PlayerActivity::class.java).putExtra("preview", DownloadRepository.encode(task).toString())).use { scenario ->
             scenario.onActivity { activity ->
+                val original = activity.requestedOrientation
+                val toggle = activity.findViewById<android.view.View>(R.id.player_fullscreen_toggle)
                 activity.setPlayerFullscreen(true)
                 assertEquals(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, activity.requestedOrientation)
-                val title = activity.window.decorView.findViewWithContentDescriptionForTest("播放器标题栏")!!
-                assertEquals(android.view.View.GONE, title.visibility)
+                assertEquals("退出全屏", toggle.contentDescription)
                 activity.setPlayerFullscreen(false)
-                assertEquals(android.view.View.VISIBLE, title.visibility)
+                assertEquals(original, activity.requestedOrientation)
+                assertEquals("全屏播放", toggle.contentDescription)
             }
         }
     }
@@ -196,9 +234,9 @@ class MediaDownloadTest {
         val recovered = requireNotNull(repository.get(original.id))
         assertEquals(TaskState.COMPLETE, recovered.state)
         assertEquals(original.context.pageUrl, recovered.context.pageUrl)
-        val firstPart = HlsPlaylist.parse(playlist, replacement.url).parts.first()
-        val bytes = context.assets.open("media-fixture/" + firstPart.url.substringAfterLast('/')).use { it.readBytes() }
-        assertArrayEquals(bytes, File(folder, "part-0.bin").readBytes())
+        assertTrue(server.requests.any { it.first == "/segment-000.ts" })
+        assertTrue(recovered.output, recovered.isMergedHls)
+        assertOfflineReady(repository.playbackUri(recovered))
     }
     @Test fun pauseResumeAndCancelKeepTemporaryFilesConsistent() {
         val task = enqueue("/slow.mp4")
@@ -233,7 +271,7 @@ class MediaDownloadTest {
         assertEquals(TaskState.COMPLETE, completed.state)
         assertEquals(1, server.requests.count { it.first == "/segment-000.ts" })
         val local = File(repository.folder(task.id), completed.output)
-        assertFalse(local.readText().contains("http"))
+        assertTrue(completed.output, completed.isMergedHls)
         assertOfflineReady(local)
     }
     @androidx.test.filters.SdkSuppress(minSdkVersion = 29)
@@ -276,12 +314,33 @@ class MediaDownloadTest {
         }
 
         val hls = download("/media.m3u8", MediaKind.HLS)
-        val zipUri = Uri.parse(hls.publicUri)
-        assertEquals("application/zip", resolver.getType(zipUri))
-        java.util.zip.ZipInputStream(resolver.openInputStream(zipUri)!!).use { zip ->
-            assertEquals("offline.m3u8", zip.nextEntry.name)
-            assertFalse(zip.readBytes().decodeToString().contains("http"))
-            assertTrue(zip.nextEntry.name.startsWith("part-"))
+        assertTrue(hls.output, hls.isMergedHls)
+        val hlsUri = Uri.parse(hls.publicUri)
+        assertEquals("video/mp4", resolver.getType(hlsUri))
+        // The four-second fixture contains over 150 AAC frames. The TS extractor groups
+        // them into about 16 packets, each of which must be split before writing MP4.
+        val extractor = android.media.MediaExtractor()
+        try {
+            extractor.setDataSource(context, hlsUri, emptyMap())
+            val audioIndex = (0 until extractor.trackCount).single {
+                extractor.getTrackFormat(it).getString(android.media.MediaFormat.KEY_MIME) == "audio/mp4a-latm"
+            }
+            extractor.selectTrack(audioIndex)
+            var frames = 0
+            var lastTime = -1L
+            val sample = java.nio.ByteBuffer.allocate(8192)
+            while (extractor.sampleTrackIndex >= 0) {
+                sample.clear()
+                assertTrue(extractor.readSampleData(sample, 0) > 2)
+                assertFalse(sample.get(0).toInt() and 255 == 255 && sample.get(1).toInt() and 0xF6 == 0xF0)
+                assertTrue(extractor.sampleTime > lastTime)
+                lastTime = extractor.sampleTime
+                frames++
+                extractor.advance()
+            }
+            assertTrue("AAC 帧数 $frames", frames in 150..190)
+        } finally {
+            extractor.release()
         }
         assertOfflineReady(repository.playbackUri(hls))
     }
@@ -290,6 +349,7 @@ class MediaDownloadTest {
         engine.run(task.id)
         val completed = repository.get(task.id)!!
         assertEquals(completed.error, TaskState.COMPLETE, completed.state)
+        assertTrue(completed.output, completed.isMergedHls)
         assertTrue(server.requests.filter { it.first == "/single.mp4" }.all { it.second.containsKey("range") })
         assertOfflineReady(File(repository.folder(task.id), completed.output))
     }
@@ -445,10 +505,5 @@ class MediaDownloadTest {
         val until = System.currentTimeMillis() + timeout
         while (System.currentTimeMillis() < until) { if (condition()) return; Thread.sleep(100) }
         fail("Timed out waiting for media pipeline")
-    }
-    private fun android.view.View.findViewWithContentDescriptionForTest(description: String): android.view.View? {
-        if (contentDescription == description) return this
-        if (this is android.view.ViewGroup) for (i in 0 until childCount) getChildAt(i).findViewWithContentDescriptionForTest(description)?.let { return it }
-        return null
     }
 }

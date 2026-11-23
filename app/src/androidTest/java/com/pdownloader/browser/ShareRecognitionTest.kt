@@ -27,6 +27,11 @@ class ShareRecognitionTest {
             if (url.contains("web-interface")) JSONObject("""
                 {"code":0,"data":{"bvid":"BV1xx411c7mD","title":"Fixture","cid":1,"pic":"https://i0.hdslb.com/cover.jpg",
                 "pages":[{"page":1,"cid":1},{"page":2,"cid":42,"part":"Second","duration":5}]}}
+            """.trimIndent()) else if (url.contains("fnval=16")) JSONObject("""
+                {"code":0,"data":{"dash":{
+                "video":[{"height":1080,"codecs":"avc1.640028","baseUrl":"https://test.bilivideo.com/v.m4s"},
+                         {"height":2160,"codecs":"avc1.640028","baseUrl":"https://example.com/v.m4s"}],
+                "audio":[{"codecs":"mp4a.40.2","base_url":"https://audio.bilivideo.cn/a.m4s","bandwidth":128000}]}}}
             """.trimIndent()) else {
                 val quality = if (url.contains("qn=64")) 64 else 16
                 JSONObject("""
@@ -45,7 +50,8 @@ class ShareRecognitionTest {
         assertEquals("Fixture · Second", result.title)
         val video = result.groups.first()
         assertEquals(5000L, video.durationMs)
-        assertEquals(listOf("720p", "360p"), video.variants.map { it.quality })
+        assertEquals(listOf("720p", "360p", "1080p · 音视频合并"), video.variants.map { it.quality })
+        assertEquals("https://audio.bilivideo.cn/a.m4s", video.variants.last().audioUrl)
         assertEquals(page, video.variants.first().requestContext?.pageUrl)
         assertTrue(requests.filter { it.contains("playurl") }.all { it.contains("cid=42") })
     }

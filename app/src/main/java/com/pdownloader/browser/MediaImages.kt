@@ -104,7 +104,7 @@ class MediaImages {
             val bitmap = runCatching {
                 val retriever = android.media.MediaMetadataRetriever()
                 try {
-                    val hls = task.variant.kind == com.pdownloader.browser.media.MediaKind.HLS
+                    val hls = task.isHlsBundle
                     if (hls && length <= 0) length = file.useLines { lines -> lines.filter { it.startsWith("#EXTINF:") }.sumOf { it.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0 }.times(1000).toLong() }
                     if (hls) retriever.setDataSource(java.io.File(folder, "part-0.bin").path)
                     else retriever.setDataSource(context, uri)

@@ -54,7 +54,10 @@ data class DownloadTask(
     val publicUri: String = "",
     val failure: DownloadFailure? = null,
     val resetPartial: Boolean = false
-)
+) {
+    val isHlsBundle get() = variant.kind == MediaKind.HLS && output.endsWith(".m3u8")
+    val isMergedHls get() = variant.kind == MediaKind.HLS && output.endsWith(".mp4")
+}
 
 class DownloadRepository private constructor(context: Context) : SQLiteOpenHelper(context.applicationContext, "downloads.db", null, 2) {
     private val downloadsRoot = File(context.applicationContext.filesDir, "downloads")
@@ -72,6 +75,7 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
     @Synchronized fun enqueue(title: String, variant: MediaVariant, context: RequestContext, thumbnail: String = "", durationMs: Long = -1, saveToPublic: Boolean = false): Pair<DownloadTask, Boolean> {
         require(variant.blockedReason.isEmpty()) { variant.blockedReason }
         require(webUrl(variant.url)) { "无效的媒体地址" }
+        require(variant.audioUrl.isBlank() || variant.kind == MediaKind.VIDEO && webUrl(variant.audioUrl)) { "无效的音轨地址" }
         val key = stableId(variant.id + context.pageUrl)
         val legacyKey = if (variant.kind == MediaKind.OTHER) stableId(variant.copy(kind = MediaKind.VIDEO).id + context.pageUrl) else key
         readableDatabase.rawQuery("SELECT payload FROM tasks WHERE dedup IN (?,?) AND state!=?", arrayOf(key, legacyKey, TaskState.CANCELLED.name)).use {
@@ -114,11 +118,12 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
     @Synchronized internal fun recover(id: String, variant: MediaVariant, context: RequestContext): Boolean {
         val previous = get(id) ?: return false
         if (previous.state != TaskState.FAILED || !previous.variant.kind.canRecoverWith(variant.kind) ||
-            variant.blockedReason.isNotEmpty() || !webUrl(variant.url)) return false
+            variant.blockedReason.isNotEmpty() || !webUrl(variant.url) ||
+            variant.audioUrl.isNotBlank() && (variant.kind != MediaKind.VIDEO || !webUrl(variant.audioUrl))) return false
         val dedup = stableId(variant.id + previous.context.pageUrl)
         if (readableDatabase.rawQuery("SELECT 1 FROM tasks WHERE dedup=? AND id!=? AND state!=? LIMIT 1",
                 arrayOf(dedup, id, TaskState.CANCELLED.name)).use { it.moveToFirst() }) return false
-        val changedUrl = previous.variant.url != variant.url || previous.variant.kind != variant.kind
+        val changedUrl = previous.variant.id != variant.id
         val task = previous.copy(
             variant = variant.copy(requestContext = null), context = context.copy(pageUrl = previous.context.pageUrl),
             state = TaskState.QUEUED, failure = null, error = "",
@@ -171,7 +176,7 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
         return File(downloadsRoot, id)
     }
     internal fun playbackUri(task: DownloadTask): Uri =
-        if (task.variant.kind != MediaKind.HLS && task.publicUri.isNotBlank()) Uri.parse(task.publicUri)
+        if (!task.isHlsBundle && task.publicUri.isNotBlank()) Uri.parse(task.publicUri)
         else Uri.fromFile(File(folder(task.id), task.output))
     private fun notifyChange() { handler.post { listeners.forEach { it() } } }
 
@@ -183,6 +188,7 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
         fun encode(task: DownloadTask) = JSONObject().apply {
             put("id", task.id); put("title", task.title); put("url", task.variant.url); put("kind", task.variant.kind.name)
             put("quality", task.variant.quality); put("height", task.variant.height); put("mime", task.variant.mime)
+            put("audioUrl", task.variant.audioUrl)
             put("page", task.context.pageUrl); put("ua", task.context.userAgent); put("referer", task.context.referer)
             put("credentialOrigin", task.context.credentialOrigin); put("authorization", task.context.authorization)
             put("state", task.state.name); put("downloaded", task.downloaded); put("total", task.total)
@@ -202,7 +208,8 @@ class DownloadRepository private constructor(context: Context) : SQLiteOpenHelpe
             val error = it.optString("error")
             val failure = if (state == TaskState.FAILED)
                 DownloadFailure.entries.find { reason -> reason.name == it.optString("failure") } ?: DownloadFailure.legacy(error) else null
-            DownloadTask(it.getString("id"), it.getString("title"), MediaVariant(url, kind, it.optString("quality"), it.optInt("height"), mime = mime),
+            DownloadTask(it.getString("id"), it.getString("title"), MediaVariant(url, kind, it.optString("quality"), it.optInt("height"),
+                mime = mime, audioUrl = it.optString("audioUrl")),
                 RequestContext(it.getString("page"), it.optString("ua"), it.optString("referer"), it.optString("credentialOrigin"), it.optString("authorization")),
                 state, it.optLong("downloaded"), it.optLong("total", -1), it.optInt("partsDone"), it.optInt("partsTotal"), error, it.optString("validator"), it.optString("output"), it.optString("thumbnail"), it.optLong("durationMs", -1), it.optBoolean("saveToPublic"), it.optString("publicUri"), failure, it.optBoolean("resetPartial"))
         }

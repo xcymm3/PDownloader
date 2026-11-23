@@ -16,7 +16,12 @@ data class RequestContext(
     val referer: String = pageUrl,
     val credentialOrigin: String = "",
     val authorization: String = ""
-)
+) {
+    internal fun forTrack(url: String): RequestContext {
+        val target = origin(url)
+        return copy(credentialOrigin = target, authorization = authorization.takeIf { credentialOrigin == target }.orEmpty())
+    }
+}
 
 data class MediaVariant(
     val url: String,
@@ -26,8 +31,9 @@ data class MediaVariant(
     val size: Long = -1,
     val mime: String = "",
     val blockedReason: String = "",
-    val requestContext: RequestContext? = null
-) { val id: String get() = stableId(kind.name + url) }
+    val requestContext: RequestContext? = null,
+    val audioUrl: String = ""
+) { val id: String get() = stableId(kind.name + url + if (audioUrl.isBlank()) "" else "\n$audioUrl") }
 
 data class MediaGroup(
     val id: String,

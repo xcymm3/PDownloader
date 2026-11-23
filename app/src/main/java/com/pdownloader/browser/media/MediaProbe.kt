@@ -28,6 +28,7 @@ class ProbeSession(val tabId: String, val pageUrl: String, val userAgent: String
     val queue = ArrayDeque<Pair<String, Int>>()
     @Volatile var alive = true
     var pending = 0
+    internal var siteScanStarted = false
     var opaqueChecks = 0
     var frameCount = 0
     var message = "尚未发现资源，可先播放视频"
@@ -90,6 +91,25 @@ class MediaProbe(private val context: Context, private val changed: () -> Unit) 
         if (active?.first === session) active = null
     }
     fun close() { closed = true; pause(); workers.shutdownNow(); android.webkit.ServiceWorkerController.getInstance().setServiceWorkerClient(null) }
+
+    internal fun scanSite(session: ProbeSession, adapter: SiteAdapter) {
+        if (!session.alive || closed || session.siteScanStarted) return
+        session.siteScanStarted = true
+        session.pending++
+        changed()
+        workers.execute {
+            val result = runCatching { adapter.recognize(session.pageUrl, session.userAgent) }.getOrNull()
+            main.post {
+                if (!session.alive || closed) return@post
+                session.pending--
+                if (result is ShareMedia.Found) {
+                    result.groups.filter { group -> group.variants.any { it.audioUrl.isNotBlank() } }
+                        .forEach { group -> session.groups[group.id] = group }
+                } else session.siteScanStarted = false
+                changed()
+            }
+        }
+    }
 
     fun observe(session: ProbeSession?, request: WebResourceRequest, shared: Boolean = false) {
         if (session?.alive != true || request.method != "GET" || request.isForMainFrame) return
