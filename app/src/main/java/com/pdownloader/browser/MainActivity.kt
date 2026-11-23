@@ -61,6 +61,8 @@ class MainActivity : ThemedActivity() {
         var url: String = "", var title: String = "新标签页",
         var web: WebView? = null, var state: Bundle? = null,
         var preview: Bitmap? = null,
+        var previewUrl: String? = null,
+        var previewRequest: Long = 0,
         var touched: Long = 0, var failed: Boolean = false,
         @Volatile var probeSession: ProbeSession? = null,
         var recovery: DownloadTask? = null,
@@ -315,6 +317,7 @@ class MainActivity : ThemedActivity() {
         hideKeyboard()
         exitFullscreen()
         release(current, keepState = false)
+        clearTabPreview(current)
         current.url = ""; current.title = "新标签页"; current.failed = false
         showTab(selectedId); persistSession()
     }
@@ -330,7 +333,7 @@ class MainActivity : ThemedActivity() {
     private fun showTab(id: String) {
         if (fullView != null) exitFullscreen()
         if (selectedId != id) { mediaSheet?.dismiss(); mediaSheet = null }
-        if (id != selectedId) captureTabPreview()
+        if (id != selectedId) captureHomePreview()
         tabs.find { it.id == selectedId }?.web?.let {
             if (id != selectedId) websiteAccess.cancelFor(it)
             it.onPause()
@@ -349,6 +352,7 @@ class MainActivity : ThemedActivity() {
             (web.parent as? ViewGroup)?.removeView(web)
             content.addView(web, FrameLayout.LayoutParams(-1, -1))
             if (section == 0) web.onResume() else web.onPause()
+            if (web.url == current.url) scheduleTabPreview(current, web)
             if (current.failed) showError("网页未能加载", "请检查网络连接，或稍后重试。")
         }
         tabs.filter { it.id != id && it.web != null }.sortedByDescending { it.touched }.drop(3).forEach { release(it, true) }
@@ -358,7 +362,7 @@ class MainActivity : ThemedActivity() {
 
     private fun showHome() {
         homePage = HomePageView(this, navigate = { url -> hideKeyboard(); load(url) },
-            bookmarks = { showRecords("bookmarks") }, history = ::openHistory, suggestions = suggestions::bind).also {
+            bookmarks = { showRecords("bookmarks") }, history = ::openHistory).also {
             content.addView(it, FrameLayout.LayoutParams(-1, -1))
         }
     }
@@ -399,6 +403,7 @@ class MainActivity : ThemedActivity() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (tab.web !== view) return
                 websiteAccess.cancelFor(view)
+                tab.previewRequest++
                 tab.url = url; tab.failed = false
                 beginProbe(tab, view, url)
                 if (tab.id == selectedId) { clearError(); updateToolbar() }
@@ -416,6 +421,10 @@ class MainActivity : ThemedActivity() {
                 }
                 if (tab.id == selectedId) updateToolbar()
                 persistSession()
+                scheduleTabPreview(tab, view)
+            }
+            override fun onPageCommitVisible(view: WebView, url: String) {
+                if (tab.web === view && tab.url == url) scheduleTabPreview(tab, view)
             }
             override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
                 if (tab.web === view && AddressResolver.isWebUrl(url) && tab.probeSession?.pageUrl != url) {
@@ -609,14 +618,56 @@ class MainActivity : ThemedActivity() {
     }
 
     fun showTabs() {
-        captureTabPreview(); selectSection(0); hideKeyboard()
+        captureHomePreview(); selectSection(0); hideKeyboard()
         tabsOpen = true; browser.visibility = View.GONE; tabOverview.visibility = View.VISIBLE
         current.web?.onPause(); probe.pause(); renderTabs()
     }
     fun closeTabs() { if (tabsOpen) selectSection(0) }
-    private fun renderTabs() { tabOverview.submit(tabs.map { TabCard(it.id, it.title, it.url, it.preview, it.id == selectedId) }) }
-    private fun captureTabPreview() {
-        if (tabs.isEmpty() || section != 0 || historyOpen || bookmarksOpen || tabsOpen || content.width <= 0 || content.height <= 0) return
+    private fun renderTabs() {
+        tabOverview.submit(tabs.map { TabCard(it.id, it.title, it.url, it.preview.takeIf { _ -> it.previewUrl == it.url }, it.id == selectedId) })
+    }
+
+    private fun scheduleTabPreview(tab: Tab, web: WebView) {
+        if (!canCapture(tab, web)) return
+        val url = tab.url
+        val request = ++tab.previewRequest
+        web.postVisualStateCallback(request, object : WebView.VisualStateCallback() {
+            override fun onComplete(requestId: Long) {
+                web.postDelayed({
+                    if (!canCapture(tab, web) || tab.previewRequest != requestId || tab.url != url) return@postDelayed
+                    val area = webPreviewBounds(web) ?: return@postDelayed
+                    val bitmap = Bitmap.createBitmap(256, (area.height() * 256f / area.width()).toInt().coerceIn(1, 400), Bitmap.Config.ARGB_8888)
+                    try {
+                        android.view.PixelCopy.request(window, area, bitmap, { result ->
+                            if (result == android.view.PixelCopy.SUCCESS && canCapture(tab, web) && webPreviewBounds(web) == area &&
+                                tab.previewRequest == requestId && tab.url == url) {
+                                tab.preview = bitmap
+                                tab.previewUrl = url
+                                io.execute { saveTabPreview(tab.id, url, bitmap) }
+                            } else bitmap.recycle()
+                        }, probeUi)
+                    } catch (_: IllegalArgumentException) {
+                        bitmap.recycle()
+                    }
+                }, 100)
+            }
+        })
+    }
+
+    private fun canCapture(tab: Tab, web: WebView): Boolean =
+        !isDestroyed && section == 0 && !tabsOpen && !historyOpen && !bookmarksOpen && fullView == null &&
+            tab.id == selectedId && tab.web === web && !tab.failed && web.isShown && web.url == tab.url
+
+    private fun webPreviewBounds(web: WebView): android.graphics.Rect? {
+        if (web.width <= 0 || web.height <= 0 || !web.isLaidOut) return null
+        val position = IntArray(2).also(web::getLocationInWindow)
+        val height = minOf(web.height, (web.width * 400f / 256).toInt())
+        return android.graphics.Rect(position[0], position[1], position[0] + web.width, position[1] + height)
+    }
+
+    private fun captureHomePreview() {
+        if (tabs.isEmpty() || current.url.isNotEmpty() || section != 0 || historyOpen || bookmarksOpen || tabsOpen ||
+            content.width <= 0 || content.height <= 0) return
         val child = content.getChildAt(0) ?: return
         if (!child.isLaidOut || child.isLayoutRequested || content.isLayoutRequested) return
         runCatching {
@@ -628,7 +679,32 @@ class MainActivity : ThemedActivity() {
             canvas.scale(width.toFloat() / content.width, width.toFloat() / content.width)
             content.draw(canvas)
             current.preview = bitmap
+            current.previewUrl = ""
         }
+    }
+
+    private fun tabPreviewFile(id: String) = android.util.AtomicFile(File(cacheDir, "tab-previews/${stableId(id)}.jpg"))
+
+    private fun saveTabPreview(id: String, url: String, bitmap: Bitmap) {
+        val file = tabPreviewFile(id)
+        runCatching {
+            val stream = file.startWrite()
+            try {
+                java.io.DataOutputStream(stream).writeUTF(url)
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 78, stream))
+                file.finishWrite(stream)
+            } catch (error: Exception) {
+                file.failWrite(stream)
+                throw error
+            }
+        }
+    }
+
+    private fun clearTabPreview(tab: Tab) {
+        tab.previewRequest++
+        tab.preview = null
+        tab.previewUrl = null
+        io.execute { tabPreviewFile(tab.id).delete() }
     }
 
     fun selectTab(id: String) { if (tabs.any { it.id == id }) { selectSection(0); showTab(id) } }
@@ -637,6 +713,7 @@ class MainActivity : ThemedActivity() {
         if (index < 0) return
         val opener = tabs[index].openerId?.takeIf { candidate -> tabs.any { it.id == candidate } }
         exitFullscreen()
+        clearTabPreview(tabs[index])
         release(tabs[index], false); tabs.removeAt(index)
         if (tabs.isEmpty()) tabs.add(Tab())
         if (id == selectedId) selectedId = opener ?: tabs[index.coerceAtMost(tabs.lastIndex)].id
@@ -772,6 +849,21 @@ class MainActivity : ThemedActivity() {
                 tab.openerId = value.optString("opener").takeIf(String::isNotBlank)
                 tab.state = savedInstanceState?.getBundle("web:$id")
                 tabs.add(tab)
+                if (url.isNotEmpty()) io.execute {
+                    val bitmap = runCatching {
+                        java.io.DataInputStream(tabPreviewFile(id).openRead()).use {
+                            if (it.readUTF() == url) android.graphics.BitmapFactory.decodeStream(it) else null
+                        }
+                    }.getOrNull() ?: return@execute
+                    runOnUiThread {
+                        if (isDestroyed || tabs.none { it === tab } || tab.url != url || tab.previewUrl == url) bitmap.recycle()
+                        else {
+                            tab.preview = bitmap
+                            tab.previewUrl = url
+                            if (tabsOpen) renderTabs()
+                        }
+                    }
+                }
                 value.optString("recovery").takeIf(String::isNotBlank)?.let { pending.add(tab to it) }
             }
         }

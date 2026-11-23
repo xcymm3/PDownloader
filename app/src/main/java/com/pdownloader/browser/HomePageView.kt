@@ -24,8 +24,7 @@ class HomePageView(
     private val activity: Activity,
     private val navigate: (String) -> Unit,
     bookmarks: () -> Unit,
-    history: () -> Unit,
-    suggestions: ((EditText) -> View)? = null
+    history: () -> Unit
 ) : ScrollView(activity) {
     internal val sites = listOf(
         HomeSite("百度", "https://www.baidu.com/", "baidu"),
@@ -58,7 +57,8 @@ class HomePageView(
             textSize = 16f; isSingleLine = true
             setTextColor(activity.color(R.color.ink)); setHintTextColor(activity.color(R.color.muted))
             background = null; setPadding(0, 0, 0, 0)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             imeOptions = EditorInfo.IME_ACTION_GO
             importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
             setOnEditorActionListener { _, action, event ->
@@ -70,7 +70,6 @@ class HomePageView(
         field.addView(search, LinearLayout.LayoutParams(0, activity.dp(56), 1f))
         field.addView(BrowserIcon(activity, "forward", "打开网址或开始搜索") { submit() }, LinearLayout.LayoutParams(activity.dp(48), activity.dp(56)))
         body.addView(field, LinearLayout.LayoutParams(-1, activity.dp(56)).apply { topMargin = activity.dp(16) })
-        suggestions?.let { body.addView(it(search), LinearLayout.LayoutParams(-1, 0).apply { topMargin = activity.dp(4) }) }
         body.addView(View(activity), LinearLayout.LayoutParams(-1, activity.dp(40)))
         sites.chunked(3).forEach { rowSites ->
             val row = activity.row()

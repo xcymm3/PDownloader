@@ -23,13 +23,43 @@ class BrowserRefreshTest {
     private fun launch() = ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java).setAction(Intent.ACTION_VIEW).setData(Uri.parse("https://pdownloader.test/video")))
 
     @Test fun tabsHaveTwoColumnsRealPreviewAndCorrectSelectionAfterClose() {
-        launch().use { scenario ->
-            scenario.onActivity { activity ->
-                activity.openNewTab("https://pdownloader.test/video?tab=2")
+        FixtureServer(context).use { server -> launch().use { scenario ->
+            val colors = mapOf("/nav-one" to "#2575bb", "/nav-two" to "#bb5425")
+            server.customResponse = { path, _ ->
+                colors[path]?.let { color ->
+                    FixtureResponse("<title>$path</title><body style='background:$color'>$path</body>".toByteArray(), "text/html")
+                }
             }
-            instrumentation.waitForIdleSync()
-            scenario.onActivity { it.showTabs() }
-            instrumentation.waitForIdleSync()
+            val pages = colors.keys.map { server.base + it }
+            for (url in pages) {
+                scenario.onActivity { it.openNewTab(url) }
+                await {
+                    java.io.File(context.cacheDir, "tab-previews").listFiles().orEmpty().any { file ->
+                        runCatching {
+                            java.io.DataInputStream(file.inputStream()).use { it.readUTF() == url && android.graphics.BitmapFactory.decodeStream(it) != null }
+                        }.getOrDefault(false)
+                    }
+                }
+            }
+            scenario.recreate()
+            scenario.onActivity { activity ->
+                activity.showTabs()
+            }
+            await {
+                var ready = false
+                scenario.onActivity { activity ->
+                    val grid = descendants(activity.window.decorView).filterIsInstance<TabOverviewView>().single().let { descendants(it).filterIsInstance<GridView>().single() }
+                    val cards = (0 until grid.adapter.count).map { grid.adapter.getItem(it) as TabCard }
+                    ready = pages.all { page ->
+                        val bitmap = cards.firstOrNull { it.url == page }?.preview ?: return@all false
+                        val pixel = bitmap.getPixel(bitmap.width / 2, bitmap.height / 2)
+                        val expected = android.graphics.Color.parseColor(colors.getValue(Uri.parse(page).path!!))
+                        kotlin.math.abs(android.graphics.Color.red(pixel) - android.graphics.Color.red(expected)) < 12 &&
+                            kotlin.math.abs(android.graphics.Color.blue(pixel) - android.graphics.Color.blue(expected)) < 12
+                    }
+                }
+                ready
+            }
             scenario.onActivity { activity ->
                 val grid = descendants(activity.window.decorView).filterIsInstance<TabOverviewView>().single().let { descendants(it).filterIsInstance<GridView>().single() }
                 assertEquals(2, grid.numColumns)
@@ -46,7 +76,7 @@ class BrowserRefreshTest {
                 activity.showTabs()
             }
             capture("tabs-grid")
-        }
+        } }
     }
 
     @Test fun bookmarksAreIndependentAndDeletingThemKeepsHistory() {
@@ -56,7 +86,14 @@ class BrowserRefreshTest {
             launch().use { scenario ->
                 scenario.onActivity { it.openBookmarks() }
                 await { var ready = false; scenario.onActivity { a -> ready = records(a).isShown && list(a).adapter.count > 0 }; ready }
-                scenario.onActivity { a -> records(a).query = "收藏夹界面回归"; assertEquals(1, list(a).adapter.count) }
+                scenario.onActivity { a ->
+                    records(a).query = "收藏夹界面回归"
+                    assertEquals(1, list(a).adapter.count)
+                    val row = list(a).adapter.getView(0, null, list(a))
+                    val texts = descendants(row).filterIsInstance<TextView>().map { it.text.toString() }.toList()
+                    assertEquals(listOf("收藏夹界面回归", "https://example.com/bookmarked"),
+                        texts.filterNot { it.length == 1 })
+                }
                 scenario.recreate()
                 await { var ready = false; scenario.onActivity { a -> ready = records(a).isShown && list(a).adapter.count == 1 }; ready }
                 capture("bookmarks-page")

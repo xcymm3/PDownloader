@@ -21,7 +21,6 @@ import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import java.time.temporal.TemporalAdjusters
 import java.util.concurrent.Executor
 
@@ -39,7 +38,6 @@ open class HistoryView(
     private var all = emptyList<PageRecord>()
     private var displayed = emptyList<PageRecord>()
     private var dayHeaders = emptyMap<Long, String>()
-    private val clockFormat = DateTimeFormatter.ofPattern("HH:mm")
     private var request = 0
     private var closed = false
     private var active = false
@@ -54,17 +52,17 @@ open class HistoryView(
         override fun getItemId(position: Int) = getItem(position).id
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
             val record = getItem(position)
-            val wrapper = activity.column().apply { setPadding(0, 0, 0, activity.dp(8)) }
+            val wrapper = activity.column().apply { setPadding(0, 0, 0, activity.dp(5)) }
             dayHeaders[record.id]?.let { heading ->
                 wrapper.addView(activity.label(heading, 13f, true).apply {
                     setPadding(activity.dp(4), 0, 0, 0)
                     typeface = Typeface.DEFAULT_BOLD
                     androidx.core.view.ViewCompat.setAccessibilityHeading(this, true)
-                }, LayoutParams(-1, activity.dp(34)))
+                }, LayoutParams(-1, activity.dp(28)))
             }
             val row = activity.row().apply {
                 background = RippleDrawable(ColorStateList.valueOf(activity.color(R.color.accent_surface)), activity.shape(R.color.history_card, 20), null)
-                setPadding(activity.dp(8), activity.dp(12), activity.dp(4), activity.dp(12))
+                setPadding(activity.dp(8), activity.dp(4), activity.dp(4), activity.dp(4))
                 isClickable = true; isFocusable = true
                 contentDescription = "${record.title}，${record.url}"
                 setOnClickListener {
@@ -91,9 +89,7 @@ open class HistoryView(
                     setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END
                     typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 })
-                addView(activity.label(record.url, 12f, true).apply { setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, activity.dp(4), 0, 0) })
-                val time = Instant.ofEpochMilli(record.visitedAt).atZone(ZoneId.systemDefault()).format(clockFormat)
-                addView(activity.label(time, 11f, true).apply { setPadding(0, activity.dp(3), 0, 0) })
+                addView(activity.label(record.url, 12f, true).apply { setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END })
             }
             row.addView(text, LayoutParams(0, -2, 1f))
             row.addView(BrowserIcon(activity, "delete", "删除 ${record.title}") { confirmDelete(record) }, LayoutParams(activity.dp(48), activity.dp(48)))
@@ -180,7 +176,7 @@ open class HistoryView(
         displayed = all.filter { text.isEmpty() || it.title.contains(text, true) || it.url.contains(text, true) }
         val zone = ZoneId.systemDefault()
         val today = LocalDate.now(zone)
-        dayHeaders = buildMap {
+        dayHeaders = if (bookmarks) emptyMap() else buildMap {
             var previous: LocalDate? = null
             for (record in displayed) {
                 val day = Instant.ofEpochMilli(record.visitedAt).atZone(zone).toLocalDate()

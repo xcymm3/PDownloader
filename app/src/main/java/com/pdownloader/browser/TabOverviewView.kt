@@ -43,7 +43,7 @@ class TabOverviewView(private val activity: Activity, back: () -> Unit, add: () 
                 background = activity.shape(R.color.surface, 12); clipToOutline = true
             }
             if (tab.preview != null) preview.addView(ImageView(activity).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setImageBitmap(tab.preview) }, FrameLayout.LayoutParams(-1, -1))
-            else preview.addView(activity.label(if (tab.url.isEmpty()) "PDownloader" else android.net.Uri.parse(tab.url).host.orEmpty(), 16f, true).apply {
+            else preview.addView(activity.label(if (tab.url.isEmpty()) "PDownloader" else "暂无预览\n${android.net.Uri.parse(tab.url).host.orEmpty()}", 14f, true).apply {
                 gravity = Gravity.CENTER; setPadding(activity.dp(8), 0, activity.dp(8), 0); maxLines = 2
             }, FrameLayout.LayoutParams(-1, -1))
             card.addView(preview, LayoutParams(-1, activity.dp(198)))

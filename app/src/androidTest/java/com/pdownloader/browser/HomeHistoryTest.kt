@@ -111,7 +111,7 @@ class HomeHistoryTest {
         }
     }
 
-    @Test fun homeSearchShowsOpenTabsBookmarksAndHistoryTogether() {
+    @Test fun homeSearchDisablesSuggestionsAndKeepsTheTypedText() {
         store.save("bookmarks", "联想收藏", "https://pdownloader.test/saved")
         store.save("history", "联想历史", "https://pdownloader.test/visited")
         launch().use { scenario ->
@@ -122,14 +122,10 @@ class HomeHistoryTest {
                 val field = descendants(home).filterIsInstance<EditText>().single()
                 assertTrue(field.requestFocus())
                 home.query = "pdownloader.test"
-            }
-            await {
-                scenario.check { activity ->
-                    val visible = descendants(activity.window.decorView).filterIsInstance<android.widget.TextView>()
-                        .filter { it.isShown }.map { it.text.toString() }.toList()
-                    visible.any { it.endsWith("切换标签") } &&
-                        "联想收藏  ·  收藏" in visible && "联想历史  ·  历史" in visible
-                }
+                assertEquals("pdownloader.test", field.text.toString())
+                assertTrue(field.inputType and android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0)
+                assertEquals(android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS, field.importantForAutofill)
+                assertFalse(descendants(home).any { it.contentDescription == "网址联想" })
             }
         }
     }
